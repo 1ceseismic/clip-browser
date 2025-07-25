@@ -1,0 +1,13 @@
+name: clip-browser
+channels:
+  - https://repo.anaconda.com/pkgs/main
+  - conda-forge
+dependencies:
+  - pytorch
+  - python=3.11
+  - faiss-cpu=1.11.0
+  - scikit-learn
+  - torchvision
+  - numpy
+  - pandas
+prefix: C:\Users\coolb\anaconda3\envs\clip-browser
