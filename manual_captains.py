@@ -3,20 +3,17 @@ import os
 import pandas as pd
 import numpy as np
 
-# --- Configuration ---
 IMAGE_FOLDER = "dataset/"
 OUTPUT_CSV = "index.csv"
 DISPLAY_SIZE = (800, 600)
 
-# Font settings for display on image
 FONT = cv2.FONT_HERSHEY_SIMPLEX
-FONT_SCALE_SMALL = 0.6 # Smaller font scale for instructions and filename
-FONT_SCALE_CAPTION = 0.8 # Slightly larger for the active caption
-FONT_COLOR = (255, 255, 255) # White
+FONT_SCALE_SMALL = 0.6 
+FONT_SCALE_CAPTION = 0.8 
+FONT_COLOR = (255, 255, 255) 
 FONT_THICKNESS = 1
-BACKGROUND_COLOR = (0, 0, 0) # Black for text background
+BACKGROUND_COLOR = (0, 0, 0) 
 
-# --- Data Loading ---
 if os.path.exists(OUTPUT_CSV):
     df = pd.read_csv(OUTPUT_CSV)
     done_files = set(df['filepath'])
@@ -26,7 +23,6 @@ else:
 
 images = sorted([f for f in os.listdir(IMAGE_FOLDER) if f.lower().endswith(('.jpg', '.png', '.jpeg'))])
 
-# --- Main Loop ---
 cv2.namedWindow("Image Tagger")
 
 for filename in images:
@@ -39,7 +35,7 @@ for filename in images:
         print(f"Skipping unreadable file: {full_path}")
         continue
 
-    # Resize image while preserving aspect ratio
+    #preserving aspect ratio during resize
     h, w = img_original.shape[:2]
     aspect_ratio = w / h
     if w > h:
@@ -54,14 +50,11 @@ for filename in images:
     while True:
         display_img = resized_img.copy()
 
-        # Display filename
         cv2.putText(display_img, f"File: {filename}", (10, 30), FONT, FONT_SCALE_SMALL, FONT_COLOR, FONT_THICKNESS)
 
-        # Display instructions
         instructions = "ESC: Quit | ENTER: Save | BACKSPACE: Del | Type:"
         cv2.putText(display_img, instructions, (10, display_img.shape[0] - 60), FONT, FONT_SCALE_SMALL, FONT_COLOR, FONT_THICKNESS)
 
-        # Display current caption
         (text_width, text_height), baseline = cv2.getTextSize(current_caption, FONT, FONT_SCALE_CAPTION, FONT_THICKNESS)
         text_x = 10
         text_y = display_img.shape[0] - 20
@@ -74,11 +67,11 @@ for filename in images:
 
         key = cv2.waitKey(1)
 
-        if key == 27: # ESC
+        if key == 27: # esc key
             print("Operation cancelled by user.")
             cv2.destroyAllWindows()
             exit()
-        elif key == 13: # ENTER
+        elif key == 13: # enter key
             if current_caption.strip():
                 df.loc[len(df)] = [full_path, current_caption.strip()]
                 df.to_csv(OUTPUT_CSV, index=False)
@@ -86,15 +79,14 @@ for filename in images:
             else:
                 print(f"Skipping '{filename}' - no caption entered.")
             break
-        elif key == 8: # BACKSPACE
+        elif key == 8: # backspace
             current_caption = current_caption[:-1]
         elif key != -1:
-            # Handle printable ASCII and common special characters
             if 32 <= key <= 126:
                 current_caption += chr(key)
-            elif key == 95: # Underscore
+            elif key == 95: 
                 current_caption += '_'
-            elif key == 45: # Hyphen
+            elif key == 45: 
                 current_caption += '-'
 
 cv2.destroyAllWindows()
