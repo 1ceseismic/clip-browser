@@ -1,0 +1,16 @@
+dataset\IMG_0717.JPG
+dataset\IMG_0718.JPG
+dataset\IMG_0794.JPG
+dataset\IMG_0797.JPG
+dataset\IMG_0815.JPG
+dataset\IMG_0825.JPG
+dataset\IMG_0834.JPG
+dataset\IMG_0842.JPG
+dataset\bladerunner_mood.JPG
+dataset\church_1.JPG
+dataset\church_2.JPG
+dataset\downstreet.JPG
+dataset\henry.JPG
+dataset\moonlight.JPG
+dataset\scribble.JPG
+dataset\the_sky.JPG
