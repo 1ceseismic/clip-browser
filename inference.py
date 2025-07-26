@@ -10,6 +10,7 @@ img_path = "sad dog.jpg"
 image = preprocess(Image.open(img_path)).unsqueeze(0)
 text = tokenizer(["a diagram", "a dog", "a cat"])
 
+
 with torch.no_grad(), torch.amp.autocast(device_type="cuda" if torch.cuda.is_available() else "cpu"):
     image_features = model.encode_image(image)
     text_features = model.encode_text(text)

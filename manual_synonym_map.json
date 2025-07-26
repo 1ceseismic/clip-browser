@@ -1,0 +1,47 @@
+{
+    "cat": [
+        "feline",
+        "kitty",
+        "house cat"
+    ],
+    "dog": [
+        "canine",
+        "puppy",
+        "hound"
+    ],
+    "car": [
+        "automobile",
+        "vehicle",
+        "auto"
+    ],
+    "house": [
+        "home",
+        "residence",
+        "dwelling"
+    ],
+    "man": [
+        "person",
+        "male",
+        "gentleman"
+    ],
+    "woman": [
+        "person",
+        "female",
+        "lady"
+    ],
+    "running": [
+        "jogging",
+        "sprinting",
+        "dashing"
+    ],
+    "big": [
+        "large",
+        "huge",
+        "enormous"
+    ],
+    "small": [
+        "tiny",
+        "little",
+        "petite"
+    ]
+}
