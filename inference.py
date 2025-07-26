@@ -3,7 +3,7 @@ from PIL import Image
 import open_clip
 
 print(torch.cuda.is_available())
-model, _, preprocess = open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_s34b_b79k')
+model, _, preprocess = open_clip.create_model_and_transforms('ViT-B-32', pretrained='openai')
 tokenizer = open_clip.get_tokenizer('ViT-B-32')
 
 img_path = "sad dog.jpg"
