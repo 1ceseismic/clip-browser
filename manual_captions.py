@@ -90,4 +90,4 @@ for filename in images:
                 current_caption += '-'
 
 cv2.destroyAllWindows()
-print("✅ All images labeled and saved.")
+print("All images labeled and saved.")
