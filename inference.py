@@ -12,6 +12,19 @@ from torch.utils.data import Dataset, DataLoader
 from sklearn.cluster import KMeans
 import umap
 
+def filter_collate_fn(batch):
+    """
+    A custom collate function that filters out items where the image failed to load.
+    This needs to be a top-level function to be picklable by multiprocessing workers.
+    """
+    # Filter out samples where the image data (at index 1) is None
+    batch = [b for b in batch if b[1] is not None]
+    if not batch:
+        # If the whole batch is bad, return None for all components
+        return None, None, None
+    # Otherwise, use the default collate function on the filtered batch
+    return torch.utils.data.default_collate(batch)
+
 class ImageFolderDataset(Dataset):
     def __init__(self, img_dir: Path, preprocess):
         self.paths = sorted([p for p in img_dir.rglob('*')
@@ -59,21 +72,17 @@ class CLIPIndexer:
         """
         img_dir_path = Path(img_dir)
         dataset = ImageFolderDataset(img_dir_path, self.preprocess)
-        # Custom collate function to filter out failed image loads
-        def collate_fn(batch):
-            batch = [b for b in batch if b[1] is not None]
-            if not batch: return None, None, None
-            return torch.utils.data.default_collate(batch)
-
+        
+        # Use the top-level, picklable collate function
         loader = DataLoader(dataset, batch_size=batch_size,
-                            shuffle=False, num_workers=num_workers, collate_fn=collate_fn)
+                            shuffle=False, num_workers=num_workers, collate_fn=filter_collate_fn)
 
         all_embs = []
         all_meta_map = {} # Use a map to handle filtered items
 
         with torch.no_grad():
             for idxs, images, paths in loader:
-                if idxs is None: continue # Skip empty batches
+                if idxs is None: continue # Skip empty batches from collate_fn
                 images = images.to(self.device)
                 feats = self.model.encode_image(images)
                 feats = feats / feats.norm(dim=-1, keepdim=True)
