@@ -28,7 +28,6 @@ g = {
     "is_indexing": False,
     "is_searching": False,
     "index_loaded": False,
-    "loaded_textures": {}, # Cache for loaded thumbnail textures {path: texture_id}
     "loading_texture_id": None,
     "ui_update_queue": queue.Queue(),
     "umap_series_tags": [], # To hold tags of UMAP plot series for deletion
@@ -78,48 +77,42 @@ def threaded_api_call(target, on_success=None, on_error=None, **kwargs):
 
 def _apply_texture(sender, app_data, user_data):
     """
-    (Main thread) Creates a DPG texture from data and applies it to a widget.
+    (Main thread) Creates a DPG texture from data and applies it to a widget, resizing the widget.
     """
     widget_tag = user_data['widget_tag']
     texture_data = user_data['texture_data']
     width = user_data['width']
     height = user_data['height']
-    full_image_path = user_data['full_image_path']
     texture_registry_tag = user_data['texture_registry_tag']
 
     if not dpg.does_item_exist(widget_tag) or not dpg.is_dearpygui_running():
         return
 
-    if full_image_path in g["loaded_textures"]:
-        dpg.set_value(widget_tag, g["loaded_textures"][full_image_path])
-        return
-
     texture_id = dpg.add_static_texture(
         width=width, height=height, default_value=texture_data, parent=texture_registry_tag
     )
-    dpg.set_value(widget_tag, texture_id)
-    g["loaded_textures"][full_image_path] = texture_id
+    
+    # Configure the image widget to use the new texture and its correct aspect-ratio dimensions
+    dpg.configure_item(widget_tag, texture_tag=texture_id, width=width, height=height)
 
-def threaded_load_texture_from_disk(full_image_path: str, widget_tag: int, texture_registry_tag: int):
+def threaded_load_texture_from_disk(full_image_path: str, widget_tag: int, texture_registry_tag: int, max_size: tuple):
     """
-    (Background thread) Loads image data and queues a UI update to create the texture.
+    (Background thread) Loads image data, resizes it to fit within max_size, and queues a UI update.
     """
     try:
         with Image.open(full_image_path) as img:
-            img.thumbnail((THUMBNAIL_SIZE, THUMBNAIL_SIZE))
+            img.thumbnail(max_size) # This preserves aspect ratio
+            thumb_width, thumb_height = img.size
             img = img.convert("RGBA")
-            # Ensure data is float32, as DPG expects. This is a critical fix.
             texture_data = (np.frombuffer(img.tobytes(), dtype=np.uint8) / 255.0).astype(np.float32)
-            width, height = img.size
 
         g["ui_update_queue"].put((
             _apply_texture,
             {
                 'widget_tag': widget_tag,
                 'texture_data': texture_data,
-                'width': width,
-                'height': height,
-                'full_image_path': full_image_path,
+                'width': thumb_width,
+                'height': thumb_height,
                 'texture_registry_tag': texture_registry_tag
             }
         ))
@@ -170,15 +163,14 @@ def display_gallery_images(sender, app_data, user_data):
                 full_path = os.path.join(g["dataset_root"], rel_path)
                 
                 with dpg.group() as item_group:
-                    texture_id = g["loaded_textures"].get(full_path, g["loading_texture_id"])
-                    img_widget_tag = dpg.add_image(texture_id, width=THUMBNAIL_SIZE, height=THUMBNAIL_SIZE)
+                    # Add placeholder, will be resized later by _apply_texture
+                    img_widget_tag = dpg.add_image(g["loading_texture_id"], width=THUMBNAIL_SIZE, height=THUMBNAIL_SIZE)
                     
-                    if texture_id == g["loading_texture_id"]:
-                        threading.Thread(
-                            target=threaded_load_texture_from_disk, 
-                            args=(full_path, img_widget_tag, "texture_registry"),
-                            daemon=True
-                        ).start()
+                    threading.Thread(
+                        target=threaded_load_texture_from_disk, 
+                        args=(full_path, img_widget_tag, "texture_registry", (THUMBNAIL_SIZE, THUMBNAIL_SIZE)),
+                        daemon=True
+                    ).start()
 
                     dpg.add_text(os.path.basename(rel_path), wrap=GALLERY_ITEM_WIDTH - 10)
                     if search_scores and j < len(search_scores):
@@ -215,7 +207,6 @@ def _handle_status_update(data):
 
 def _clear_main_views():
     """(Main Thread) Clears all data views in the UI to prepare for new data."""
-    g["loaded_textures"].clear()
     if dpg.does_item_exist("search_gallery"):
         dpg.delete_item("search_gallery", children_only=True)
         dpg.add_text("Loading...", parent="search_gallery")
@@ -323,11 +314,14 @@ def callback_search(sender, app_data):
         ))
         g["is_searching"] = False
         dpg.enable_item("search_group")
+        g["ui_update_queue"].put((lambda s, a, u: dpg.focus_item(u), "search_input"))
+
 
     def on_error(error_message):
         update_status(f"Search error: {error_message}")
         g["is_searching"] = False
         dpg.enable_item("search_group")
+        g["ui_update_queue"].put((lambda s, a, u: dpg.focus_item(u), "search_input"))
 
     threaded_api_call(target=requests.get, on_success=on_success, on_error=on_error, url=f"{API_URL}/search", params={"q": query, "top_k": top_k})
 
@@ -366,7 +360,7 @@ def _create_cluster_card(sender, app_data, cluster):
                 for path in cluster['preview_paths']:
                     img_widget = dpg.add_image(g["loading_texture_id"], width=50, height=50)
                     full_path = os.path.join(g["dataset_root"], path)
-                    threading.Thread(target=threaded_load_texture_from_disk, args=(full_path, img_widget, "texture_registry"), daemon=True).start()
+                    threading.Thread(target=threaded_load_texture_from_disk, args=(full_path, img_widget, "texture_registry", (50, 50)), daemon=True).start()
 
 def callback_view_cluster(sender, app_data, user_data):
     cluster_id = user_data
@@ -558,5 +552,5 @@ def launch_gui(api_url: str):
     dpg.destroy_context()
 
 if __name__ == "__main__":
-    print("Running GUI in standalone mode ; Make sure the FastAPI server is running")
+    print("Running GUI in standalone mode. Make sure the FastAPI server is running.")
     launch_gui(api_url="http://127.0.0.1:8000")
