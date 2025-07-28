@@ -1,3 +1,7 @@
+dearpygui
+uvicorn
+python-multipart
+requests
 brotlicffi @ file:///C:/b/abs_f4lixvzmxt/croot/brotlicffi_1736183286104/work
 certifi @ file:///C:/b/abs_67mh6i36ci/croot/certifi_1752653721535/work/certifi
 cffi @ file:///C:/b/abs_29_b57if3f/croot/cffi_1736184144340/work
