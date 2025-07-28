@@ -18,7 +18,6 @@ g = {
     "dataset_root": None,
     "subdirectories": [],
     "selected_subdir": None,
-    "status_text": "Initializing...",
     "is_indexing": False,
     "is_searching": False,
     "index_loaded": False,
@@ -26,12 +25,14 @@ g = {
     "loading_texture_id": None,
 }
 
-# --- API Communication (threaded) ---
+# --- GUI Update Helpers ---
 
-def update_status(text: str):
-    """Helper to update the status bar text from any thread."""
-    if dpg.does_item_exist("status_text"):
-        dpg.set_value("status_text", text)
+def update_search_status(text: str):
+    """Helper to update the search status bar text from any thread."""
+    if dpg.does_item_exist("search_status_text"):
+        dpg.set_value("search_status_text", text)
+
+# --- API Communication (threaded) ---
 
 def threaded_api_call(target, on_success=None, on_error=None, **kwargs):
     """Generic wrapper to run API calls in a background thread."""
@@ -53,7 +54,7 @@ def threaded_api_call(target, on_success=None, on_error=None, **kwargs):
             if on_error:
                 on_error(error_message)
             else:
-                update_status(error_message)
+                update_search_status(error_message)
 
     thread = threading.Thread(target=thread_target)
     thread.daemon = True
@@ -129,12 +130,12 @@ def callback_select_dataset_root(sender, app_data):
 def callback_dataset_root_selected(sender, app_data):
     if 'file_path_name' in app_data and app_data['file_path_name']:
         path = app_data['file_path_name']
-        update_status(f"Setting dataset root to: {path}...")
+        update_search_status(f"Setting dataset root to: {path}...")
 
         def on_success(data):
             g["dataset_root"] = path
             dpg.set_value("dataset_root_text", f"Current Root: {path}")
-            update_status("Dataset root set. Fetching subdirectories...")
+            update_search_status("Dataset root set. Fetching subdirectories...")
             threaded_api_call(target=requests.get, on_success=on_get_directories_success, url=f"{API_URL}/directories")
 
         threaded_api_call(target=requests.post, on_success=on_success, url=f"{API_URL}/set-dataset-root", json={"path": path})
@@ -142,10 +143,10 @@ def callback_dataset_root_selected(sender, app_data):
 def on_get_directories_success(data):
     g["subdirectories"] = data.get("directories", [])
     if not g["subdirectories"]:
-        update_status("No subdirectories with images found. You can index the root.")
+        update_search_status("No subdirectories with images found. You can index the root.")
         g["subdirectories"] = ['.']
     else:
-        update_status("Subdirectories loaded. Please select one to index.")
+        update_search_status("Subdirectories loaded. Please select one to index.")
 
     dpg.configure_item("subdir_selector", items=g["subdirectories"])
     if g["subdirectories"]:
@@ -160,11 +161,11 @@ def callback_build_index(sender, app_data):
     g["is_indexing"] = True
     dpg.disable_item("build_index_button")
     dpg.disable_item("select_root_button")
-    update_status(f"Building index for '{g['selected_subdir']}'. This may take a while...")
+    update_search_status(f"Building index for '{g['selected_subdir']}'. This may take a while...")
 
     def on_success(data):
         total = data.get('total', 'N/A')
-        update_status(f"Index built successfully with {total} images. Loading gallery...")
+        update_search_status(f"Index built successfully with {total} images. Loading gallery...")
         g["is_indexing"] = False
         g["index_loaded"] = True
         dpg.enable_item("build_index_button")
@@ -173,7 +174,7 @@ def callback_build_index(sender, app_data):
         load_all_images_from_api()
 
     def on_error(error_message):
-        update_status(f"Error building index: {error_message}")
+        update_search_status(f"Error building index: {error_message}")
         g["is_indexing"] = False
         dpg.enable_item("build_index_button")
         dpg.enable_item("select_root_button")
@@ -186,7 +187,7 @@ def callback_subdir_selected(sender, app_data):
 def callback_search(sender, app_data):
     if g["is_searching"] or not g["index_loaded"]: return
     g["is_searching"] = True
-    update_status("Searching...")
+    update_search_status("Searching...")
     dpg.disable_item("search_group")
 
     query = dpg.get_value("search_input")
@@ -196,20 +197,17 @@ def callback_search(sender, app_data):
         results = data.get("results", [])
         paths = [r["path"] for r in results]
         scores = [r["score"] for r in results]
-        update_status(f"Found {len(results)} results for '{query}'.")
-        # Schedule the UI update on the main thread
-        dpg.add_button(
-            label="Display Gallery",
-            parent="results_gallery",
+        update_search_status(f"Found {len(results)} results for '{query}'.")
+        # Schedule the UI update on the main thread using the correct function
+        dpg.mvSubmitCallback(
             callback=display_gallery_images,
-            user_data={"image_paths": paths}
+            user_data={"image_paths": paths, "search_scores": scores}
         )
-
         g["is_searching"] = False
         dpg.enable_item("search_group")
 
     def on_error(error_message):
-        update_status(f"Search error: {error_message}")
+        update_search_status(f"Search error: {error_message}")
         g["is_searching"] = False
         dpg.enable_item("search_group")
 
@@ -217,18 +215,15 @@ def callback_search(sender, app_data):
 
 def load_all_images_from_api():
     """Fetches all image paths from the index and displays them."""
-    update_status("Loading all indexed images...")
+    update_search_status("Loading all indexed images...")
     def on_success(data):
         paths = data.get("images", [])
-        update_status(f"Displaying {len(paths)} images.")
-        # Schedule the UI update on the main thread
-        dpg.add_button(
-            parent="results_gallery",
-            label="Display Gallery",
+        update_search_status(f"Displaying {len(paths)} images.")
+        # Schedule the UI update on the main thread using the correct function
+        dpg.mvSubmitCallback(
             callback=display_gallery_images,
             user_data={"image_paths": paths}
         )
-
 
     threaded_api_call(target=requests.get, on_success=on_success, url=f"{API_URL}/all-images")
 
@@ -246,9 +241,9 @@ def on_initial_status_success(data):
     if g["index_loaded"]:
         dpg.enable_item("search_group")
         load_all_images_from_api()
-        update_status(f"Loaded existing index with {data.get('indexed_image_count', 0)} images.")
+        update_search_status(f"Loaded existing index with {data.get('indexed_image_count', 0)} images.")
     else:
-        update_status("Welcome! Please select a dataset root to begin.")
+        update_search_status("Welcome! Please select a dataset root to begin.")
 
 def initialize_app_state():
     """Fetches initial status from the backend to set up the UI."""
@@ -286,14 +281,17 @@ def setup_ui():
                 # --- Results Gallery ---
                 with dpg.child_window(tag="results_gallery"):
                     dpg.add_text("Build an index or perform a search to see images here.")
+                
+                dpg.add_separator()
+                # --- Status Bar for this tab ---
+                dpg.add_text("Initializing...", tag="search_status_text")
+
 
             # This is a placeholder for the training UI, as requested.
             with dpg.tab(label="Training"):
                 dpg.add_text("Training and data augmentation UI will be implemented here.")
                 dpg.add_text("This section will allow fine-tuning the CLIP model on your own datasets.")
 
-        # --- Status Bar ---
-        dpg.add_text(g["status_text"], tag="status_text")
 
 def launch_gui(api_url: str):
     global API_URL
