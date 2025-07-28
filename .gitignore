@@ -1,3 +1,6 @@
 /dataset
 /logs
 /local_llm_models
+/.aider.tags.cache.v4
+.aider*
+*.pt
