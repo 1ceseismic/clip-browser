@@ -11,6 +11,7 @@ import subprocess
 import sys
 import config
 import colorsys
+import time
 
 # --- Constants ---
 WINDOW_WIDTH = 1280
@@ -201,7 +202,7 @@ def _handle_status_update(data):
             load_umap_data()
     else:
         if g["dataset_root"]:
-             update_status("No index found. Please select a target and build an index.")
+             update_status("Loading model and index...")
         else:
              update_status("Welcome! Please select a dataset root to begin.")
 
@@ -235,9 +236,8 @@ def set_dataset_root(path: str):
     rebuild_recent_files_menu()
 
     def on_set_root_success(data):
-        # This will fetch the new status and trigger _handle_status_update,
-        # which will repopulate the UI with the new data.
-        threaded_api_call(target=requests.get, on_success=_handle_status_update, url=f"{API_URL}/status")
+        # The status poller will automatically pick up the change and update the UI
+        pass
 
     threaded_api_call(target=requests.post, on_success=on_set_root_success, url=f"{API_URL}/set-dataset-root", json={"path": path})
 
@@ -272,16 +272,10 @@ def callback_build_index(sender, app_data):
     update_status(f"Building index for '{g['selected_subdir']}'. This may take a while...")
 
     def on_success(data):
-        total = data.get('total', 'N/A')
-        update_status(f"Index built successfully with {total} images. Loading gallery...")
+        # The status poller will pick up the change.
         g["is_indexing"] = False
-        g["index_loaded"] = True
         dpg.enable_item("build_index_button")
         dpg.enable_item("select_root_menu_item")
-        dpg.enable_item("search_group")
-        load_all_images_from_api()
-        threaded_api_call(target=requests.get, on_success=on_get_clusters_success, url=f"{API_URL}/clusters")
-        load_umap_data()
 
     def on_error(error_message):
         update_status(f"Error building index: {error_message}")
@@ -435,14 +429,45 @@ def load_umap_data():
     threaded_api_call(
         target=requests.get,
         on_success=_on_get_umap_data_success,
-        on_error=lambda e: update_status(f"Could not load UMAP data: {e}. Requires new API endpoint.", "umap_status_text"),
+        on_error=lambda e: update_status(f"Could not load UMAP data: {e}", "umap_status_text"),
         url=f"{API_URL}/all-metadata"
     )
 
 # --- App Initialization ---
 
+def status_poller():
+    """
+    Runs in a background thread, periodically checking the server status
+    and triggering a UI update only when the state changes.
+    """
+    last_known_status = {"index_loaded": None, "dataset_root": None}
+    while dpg.is_dearpygui_running():
+        try:
+            response = requests.get(f"{API_URL}/status", timeout=5)
+            response.raise_for_status()
+            current_status = response.json()
+
+            # Check if the relevant state has changed
+            if (current_status.get("index_loaded") != last_known_status.get("index_loaded") or
+                current_status.get("dataset_root") != last_known_status.get("dataset_root")):
+                
+                print(f"Status changed: {current_status}. Triggering UI update.")
+                last_known_status = current_status
+                g["ui_update_queue"].put((_handle_status_update, current_status))
+
+        except requests.RequestException:
+            # Don't spam logs, just update status bar if connection is lost
+            if g.get("index_loaded") is not None: # Check if it was ever loaded
+                update_status("Connection to server lost. Reconnecting...")
+                g["index_loaded"] = None # Force a refresh on reconnect
+                last_known_status = {"index_loaded": None, "dataset_root": None}
+
+        time.sleep(2) # Poll every 2 seconds
+
 def initialize_app_state():
-    threaded_api_call(target=requests.get, on_success=_handle_status_update, url=f"{API_URL}/status")
+    """Starts the background thread that polls for server status."""
+    poller_thread = threading.Thread(target=status_poller, daemon=True)
+    poller_thread.start()
 
 def callback_set_recent_root(sender, app_data, user_data):
     """Callback for recent file menu items to set the dataset root."""

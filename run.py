@@ -50,7 +50,7 @@ def stop_server():
 def wait_for_server():
     """Waits for the server to become responsive."""
     start_time = time.time()
-    while time.time() - start_time < 40:  # 20-second timeout
+    while time.time() - start_time < 20:  # 20-second timeout
         try:
             # Use a short timeout for each request
             response = requests.get(f"{API_URL}/health", timeout=1)
