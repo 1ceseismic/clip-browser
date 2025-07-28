@@ -1,6 +1,6 @@
 import json
 import os
-from typing import List
+from typing import List, Optional
 
 CONFIG_FILE = "config.json"
 MAX_RECENT_FILES = 5
@@ -21,7 +21,7 @@ def save_config(config: dict):
         json.dump(config, f, indent=2)
 
 def add_recent_path(path: str):
-    """Adds a path to the list of recent paths, ensuring no duplicates."""
+    """Adds a path to the list of recent paths, ensuring it's at the top."""
     config = load_config()
     recent_paths: List[str] = config.get("recent_paths", [])
     
@@ -40,3 +40,8 @@ def add_recent_path(path: str):
 def get_recent_paths() -> List[str]:
     """Gets the list of recent paths from the config."""
     return load_config().get("recent_paths", [])
+
+def get_last_used_path() -> Optional[str]:
+    """Gets the most recent path from the config, which is the last one used."""
+    paths = get_recent_paths()
+    return paths[0] if paths else None

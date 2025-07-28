@@ -10,6 +10,7 @@ import json
 from PIL import Image
 from typing import Optional, List, Dict
 from collections import defaultdict
+import config
 
 # --- Configuration ---
 INDEX_FILE = "image.index"
@@ -72,38 +73,53 @@ class ClusterImagesResponse(BaseModel):
 
 @app.on_event("startup")
 def startup():
-    """Load the index and metadata from disk if they exist."""
+    """Load the last used index and metadata from disk if they exist."""
     try:
         with _idx_lock:
-            # Load app metadata first to find the dataset root
-            if os.path.exists(APP_METADATA_FILE):
-                with open(APP_METADATA_FILE) as f:
-                    app_metadata = json.load(f)
-                    g["indexed_dir"] = app_metadata.get("indexed_dir")
-                    # Important: Set dataset_root from metadata if available
-                    if app_metadata.get("dataset_root"):
-                        g["dataset_root"] = Path(app_metadata.get("dataset_root"))
+            last_root = config.get_last_used_path()
+            if not last_root:
+                print("No last used dataset root found in config.")
+                return
+
+            # Check if the index files exist in the project root.
+            if not all(os.path.exists(f) for f in [APP_METADATA_FILE, INDEX_FILE, METADATA_FILE]):
+                 print("Index files not found in project directory. Please build an index.")
+                 return
+
+            with open(APP_METADATA_FILE) as f:
+                app_metadata = json.load(f)
             
+            # Verify the saved index belongs to the last used dataset root
+            if app_metadata.get("dataset_root") != last_root:
+                print(f"Index mismatch: Found index for '{app_metadata.get('dataset_root')}' but last session used '{last_root}'. Not loading.")
+                return
+
+            print(f"Found valid index for last used root: {last_root}")
+            g["dataset_root"] = Path(last_root)
+            g["indexed_dir"] = app_metadata.get("indexed_dir")
             g["indexer"].load_index(INDEX_FILE, METADATA_FILE)
 
-            if not g["indexed_dir"]:
-                raise KeyError("indexed_dir not found in app metadata")
             print(f"Loaded index for '{g['indexed_dir']}' with {g['indexer'].index.ntotal} embeddings.")
 
     except (FileNotFoundError, KeyError, json.JSONDecodeError, ValueError, AttributeError, RuntimeError) as e:
-        print(f"Index files missing or invalid — rebuild using /build-index. Error: {e}")
+        print(f"Startup Error: Index files missing or invalid. Rebuild using the UI. Error: {e}")
         g["indexer"].index = None
         g["indexer"].metadata = []
         g["indexed_dir"] = None
+        g["dataset_root"] = None
 
 
 @app.post("/set-dataset-root")
 def set_dataset_root(payload: PathRequest):
-    """Sets the root directory for datasets."""
+    """Sets the root directory for datasets and saves it to config."""
     new_root = Path(payload.path)
     if not new_root.is_dir():
         raise HTTPException(status_code=404, detail="Path is not a valid directory")
     g["dataset_root"] = new_root
+    
+    # Save this path as the most recent one
+    config.add_recent_path(str(new_root))
+    
     return {"status": "ok", "path": str(new_root)}
 
 @app.post("/build-index")
@@ -196,9 +212,9 @@ def get_status():
     with _idx_lock:
         count = 0
         has_clusters = False
-        if g["indexer"].index is not None:
+        if g["indexer"].index is not None and g["indexer"].metadata:
             count = g["indexer"].index.ntotal
-            if g["indexer"].metadata and 'cluster_id' in g["indexer"].metadata[0]:
+            if 'cluster_id' in g["indexer"].metadata[0]:
                 has_clusters = True
         
         return AppStatus(

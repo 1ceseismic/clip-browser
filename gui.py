@@ -311,7 +311,8 @@ def on_initial_status_success(data):
     g["index_loaded"] = data.get("index_loaded", False)
     
     if g["dataset_root"]:
-        set_dataset_root(g["dataset_root"]) # This will trigger subdirectory loading
+        # This will also rebuild the recent files menu
+        set_dataset_root(g["dataset_root"])
     
     if g["index_loaded"]:
         dpg.enable_item("search_group")
@@ -359,7 +360,7 @@ def setup_ui():
                         dpg.add_input_int(tag="top_k_input", label="Top K", width=100, default_value=10, min_value=1, max_value=100)
                         dpg.add_button(label="Search", callback=callback_search)
                 dpg.add_separator()
-                with dpg.child_window(tag="search_gallery"):
+                with dpg.child_window(tag="search_gallery", width=-1):
                     dpg.add_text("Build an index or perform a search to see images here.")
                 dpg.add_separator()
                 dpg.add_text("Initializing...", tag="search_status_text")
@@ -368,7 +369,7 @@ def setup_ui():
                 with dpg.group(horizontal=True):
                     with dpg.child_window(tag="cluster_sidebar", width=250):
                         dpg.add_text("Clusters will appear here after indexing.")
-                    with dpg.child_window(tag="cluster_gallery"):
+                    with dpg.child_window(tag="cluster_gallery", width=-1):
                         dpg.add_text("Select a cluster to view images.")
                 dpg.add_separator()
                 dpg.add_text("Status", tag="cluster_status_text")
