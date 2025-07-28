@@ -33,6 +33,7 @@ g = {
     "loading_texture_id": None,
     "ui_update_queue": queue.Queue(),
     "umap_series_tags": [], # To hold tags of UMAP plot series for deletion
+    "score_plot_series_tag": None, # To hold the tag for the score plot series
 }
 
 # --- GUI Update Helpers ---
@@ -183,6 +184,30 @@ def display_gallery_images(sender, app_data, user_data):
 
 # --- UI Callbacks ---
 
+def _update_score_distribution_plot(sender, app_data, user_data):
+    """(Main Thread) Updates the score distribution plot with new scores."""
+    scores = user_data
+    x_axis_tag = "score_plot_x_axis"
+    y_axis_tag = "score_plot_y_axis"
+
+    # Clear previous series if it exists
+    if g.get("score_plot_series_tag") and dpg.does_item_exist(g["score_plot_series_tag"]):
+        dpg.delete_item(g["score_plot_series_tag"])
+        g["score_plot_series_tag"] = None
+
+    if not scores:
+        dpg.set_axis_limits(x_axis_tag, 0, 1)
+        return
+
+    x_data = list(range(len(scores)))
+    
+    # Add new series
+    g["score_plot_series_tag"] = dpg.add_bar_series(x_data, scores, label="Scores", parent=y_axis_tag, weight=0.5)
+    
+    # Fit axes to data
+    dpg.set_axis_limits(x_axis_tag, -0.5, len(scores) - 0.5)
+    # The Y axis is already fixed from 0 to 1, which is good.
+
 def _handle_status_update(sender, app_data, user_data):
     """Shared logic to update UI based on app status response."""
     data = user_data
@@ -226,6 +251,9 @@ def _clear_main_views(sender, app_data, user_data):
             if dpg.does_item_exist(tag):
                 dpg.delete_item(tag)
         g["umap_series_tags"].clear()
+    if g.get("score_plot_series_tag") and dpg.does_item_exist(g["score_plot_series_tag"]):
+        dpg.delete_item(g["score_plot_series_tag"])
+        g["score_plot_series_tag"] = None
 
 def set_dataset_root(path: str):
     """Sets the dataset root, clears the UI, and triggers a backend status update."""
@@ -309,6 +337,9 @@ def callback_search(sender, app_data):
         paths = [r["path"] for r in results]
         scores = [r["score"] for r in results]
         update_status(f"Found {len(results)} results for '{query}'.")
+        
+        g["ui_update_queue"].put((_update_score_distribution_plot, scores))
+        
         g["ui_update_queue"].put((
             display_gallery_images,
             {"gallery_tag": "search_gallery", "image_paths": paths, "search_scores": scores}
@@ -529,6 +560,11 @@ def setup_ui():
                         dpg.add_input_text(tag="search_input", hint="Enter search query...", width=-150, on_enter=True, callback=callback_search)
                         dpg.add_input_int(tag="top_k_input", label="Top K", width=100, default_value=10, min_value=1, max_value=100)
                         dpg.add_button(label="Search", callback=callback_search)
+                dpg.add_separator()
+                with dpg.plot(label="Score Distribution", height=150, width=-1, tag="score_plot"):
+                    dpg.add_plot_axis(dpg.mvXAxis, label="Result Rank", tag="score_plot_x_axis")
+                    y_axis = dpg.add_plot_axis(dpg.mvYAxis, label="Similarity Score", tag="score_plot_y_axis")
+                    dpg.set_axis_limits(y_axis, 0.0, 1.0)
                 dpg.add_separator()
                 with dpg.child_window(tag="search_gallery", width=-1):
                     dpg.add_text("Build an index or perform a search to see images here.")
