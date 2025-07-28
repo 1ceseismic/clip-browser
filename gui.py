@@ -182,8 +182,9 @@ def display_gallery_images(sender, app_data, user_data):
 
 # --- UI Callbacks ---
 
-def _handle_status_update(data):
+def _handle_status_update(sender, app_data, user_data):
     """Shared logic to update UI based on app status response."""
+    data = user_data
     g["dataset_root"] = data.get("dataset_root")
     g["index_loaded"] = data.get("index_loaded", False)
 
