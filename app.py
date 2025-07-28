@@ -220,10 +220,9 @@ def get_thumbnail(image_path: str):
     try:
         thumbnail_path.parent.mkdir(parents=True, exist_ok=True)
         with Image.open(full_image_path) as img:
+            # Convert to RGB first to handle all modes before processing
+            img = img.convert("RGB")
             img.thumbnail(THUMBNAIL_MAX_SIZE)
-            # Convert to RGB before saving as JPEG to handle RGBA, P, etc.
-            if img.mode != "RGB":
-                img = img.convert("RGB")
             img.save(thumbnail_path, "JPEG", quality=85)
         return FileResponse(str(thumbnail_path))
     except Exception as e:

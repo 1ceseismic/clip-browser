@@ -121,7 +121,6 @@ def display_gallery_images(sender, app_data, user_data):
     
     count = 0
     for i, rel_path in enumerate(image_paths):
-        # We no longer need the full path in the GUI
         with dpg.group(parent="results_gallery", width=GALLERY_ITEM_WIDTH):
             img_widget_tag = dpg.add_image(g["loading_texture_id"], width=THUMBNAIL_SIZE, height=THUMBNAIL_SIZE)
             dpg.add_text(os.path.basename(rel_path), wrap=GALLERY_ITEM_WIDTH - 10)
@@ -135,8 +134,9 @@ def display_gallery_images(sender, app_data, user_data):
             ).start()
 
         count += 1
+        # After adding a group, check if we need to stay on the same line for the next item
         if count % items_per_row != 0:
-            dpg.add_same_line(parent="results_gallery")
+            dpg.add_same_line()
 
 # --- UI Callbacks ---
 

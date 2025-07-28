@@ -22,7 +22,10 @@ class ImageFolderDataset(Dataset):
 
     def __getitem__(self, idx):
         path = self.paths[idx]
-        img = Image.open(path).convert('RGB')
+        with Image.open(path) as img:
+            # Convert to RGBA first to handle palette transparency gracefully, then to RGB.
+            # This is a robust way to handle various image modes before processing.
+            img = img.convert('RGBA').convert('RGB')
         return idx, self.preprocess(img), str(path)
 
 
