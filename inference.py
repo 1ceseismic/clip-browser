@@ -9,7 +9,8 @@ import faiss
 import open_clip
 from PIL import Image
 from torch.utils.data import Dataset, DataLoader
-
+from sklearn.cluster import KMeans
+import umap
 
 class ImageFolderDataset(Dataset):
     def __init__(self, img_dir: Path, preprocess):
@@ -22,11 +23,16 @@ class ImageFolderDataset(Dataset):
 
     def __getitem__(self, idx):
         path = self.paths[idx]
-        with Image.open(path) as img:
-            # Convert to RGBA first to handle palette transparency gracefully, then to RGB.
-            # This is a robust way to handle various image modes before processing.
-            img = img.convert('RGBA').convert('RGB')
-        return idx, self.preprocess(img), str(path)
+        try:
+            with Image.open(path) as img:
+                # Convert to RGBA first to handle palette transparency gracefully, then to RGB.
+                # This is a robust way to handle various image modes before processing.
+                img = img.convert('RGBA').convert('RGB')
+            return idx, self.preprocess(img), str(path)
+        except Exception as e:
+            print(f"Warning: Could not load image {path}, skipping. Error: {e}")
+            # Return None to indicate a failed load
+            return idx, None, str(path)
 
 
 class CLIPIndexer:
@@ -47,21 +53,27 @@ class CLIPIndexer:
         """Returns a list of paths from the metadata."""
         return [item['path'] for item in self.metadata]
 
-    def build_index(self,img_dir: str, index_path: str, meta_path: str, batch_size: int = 32, num_workers: int = 4):
+    def build_index(self,img_dir: str, index_path: str, meta_path: str, batch_size: int = 32, num_workers: int = 4, n_clusters: int = 10):
         """
-        Compute embeddings for all images in img_dir, build a FAISS IndexIDMap,
-        and save the index and metadata (paths + optional mtime)
+        Compute embeddings, cluster them, and save the index and metadata.
         """
         img_dir_path = Path(img_dir)
         dataset = ImageFolderDataset(img_dir_path, self.preprocess)
+        # Custom collate function to filter out failed image loads
+        def collate_fn(batch):
+            batch = [b for b in batch if b[1] is not None]
+            if not batch: return None, None, None
+            return torch.utils.data.default_collate(batch)
+
         loader = DataLoader(dataset, batch_size=batch_size,
-                            shuffle=False, num_workers=num_workers)
+                            shuffle=False, num_workers=num_workers, collate_fn=collate_fn)
 
         all_embs = []
-        all_meta = []
+        all_meta_map = {} # Use a map to handle filtered items
 
         with torch.no_grad():
             for idxs, images, paths in loader:
+                if idxs is None: continue # Skip empty batches
                 images = images.to(self.device)
                 feats = self.model.encode_image(images)
                 feats = feats / feats.norm(dim=-1, keepdim=True)
@@ -69,52 +81,72 @@ class CLIPIndexer:
                 for i, p_str in zip(idxs.tolist(), paths):
                     p = Path(p_str)
                     stat = p.stat()
-                    # Store path as a relative string with forward slashes for consistency
                     rel_path = p.relative_to(img_dir_path).as_posix()
-                    all_meta.append({
+                    all_meta_map[i] = {
                         'id': i,
                         'path': rel_path,
                         'mtime': stat.st_mtime
-                    })
+                    }
+
+        if not all_embs:
+            print("No images were successfully processed. Index not built.")
+            return
 
         embeddings = np.vstack(all_embs).astype('float32')
+        
+        # --- Clustering and Dimensionality Reduction ---
+        print("Performing clustering...")
+        # Ensure we don't have more clusters than samples
+        actual_n_clusters = min(n_clusters, len(embeddings))
+        kmeans = KMeans(n_clusters=actual_n_clusters, random_state=0, n_init='auto').fit(embeddings)
+        
+        print("Performing UMAP reduction...")
+        reducer = umap.UMAP(n_components=2, random_state=42)
+        umap_coords = reducer.fit_transform(embeddings)
+
+        # --- Finalize Metadata ---
+        final_meta = []
+        valid_ids = sorted(all_meta_map.keys())
+        for new_id, old_id in enumerate(valid_ids):
+            meta_item = all_meta_map[old_id]
+            meta_item['id'] = new_id # Re-index to be contiguous
+            meta_item['cluster_id'] = int(kmeans.labels_[new_id])
+            meta_item['umap'] = umap_coords[new_id].tolist()
+            final_meta.append(meta_item)
+
+        # --- Build FAISS Index ---
         dim = embeddings.shape[1]
         index = faiss.IndexFlatIP(dim)
         self.index = faiss.IndexIDMap(index)
-        ids = np.arange(len(embeddings))
+        # Use the new contiguous IDs
+        ids = np.arange(len(final_meta)).astype('int64')
         self.index.add_with_ids(embeddings, ids)
 
         faiss.write_index(self.index, index_path)
-        # Sort metadata by ID before saving to ensure consistency
-        all_meta.sort(key=lambda x: x['id'])
         with open(meta_path, 'w') as f:
-            json.dump(all_meta, f, indent=2)
+            json.dump(final_meta, f, indent=2)
 
         print(f"Index saved to {index_path}, metadata saved to {meta_path}")
 
     def load_index(self, index_path: str, meta_path: str):
         """Load a saved FAISS index and its metadata."""
-
         self.index = faiss.read_index(index_path)
         with open(meta_path, 'r') as f:
-            # The metadata should already be sorted by ID, but we store the whole list
             self.metadata = json.load(f)
         
-        # Consistency check
         if self.index.ntotal != len(self.metadata):
             raise ValueError("Index size and metadata length do not match.")
 
         print(f"Loaded index ({self.index.ntotal} vectors) and {len(self.metadata)} metadata entries")
 
     def search(self, query: str, top_k: int = 5) -> list[tuple[str, float]]: 
-    # Encode query into embeddings and search the faiss index; we return the scores along with img path  
         tokens = self.tokenizer([query]).to(self.device)
         with torch.no_grad():
             txt_emb = self.model.encode_text(tokens)
             txt_emb = txt_emb / txt_emb.norm(dim=-1, keepdim=True)
         q_np = txt_emb.cpu().numpy().astype('float32')
         D, I = self.index.search(q_np, top_k)
-        results = [(self.metadata[i]['path'], float(D[0][k])) for k, i in enumerate(I[0])]
+        results = [(self.metadata[i]['path'], float(D[0][k])) for k, i in enumerate(I[0]) if i != -1]
         return results
 
 

@@ -8,7 +8,8 @@ import os
 from pathlib import Path
 import json
 from PIL import Image
-from typing import Optional
+from typing import Optional, List, Dict
+from collections import defaultdict
 
 # --- Configuration ---
 INDEX_FILE = "image.index"
@@ -52,6 +53,20 @@ class AppStatus(BaseModel):
     indexed_dir: Optional[str]
     index_loaded: bool
     indexed_image_count: int
+    has_clusters: bool
+
+class ClusterInfo(BaseModel):
+    cluster_id: int
+    count: int
+    preview_paths: List[str]
+
+class ClustersResponse(BaseModel):
+    clusters: List[ClusterInfo]
+
+class ClusterImagesResponse(BaseModel):
+    cluster_id: int
+    image_paths: List[str]
+
 
 # --- API Endpoints ---
 
@@ -180,15 +195,59 @@ def get_status():
     """Returns the current status of the application."""
     with _idx_lock:
         count = 0
+        has_clusters = False
         if g["indexer"].index is not None:
             count = g["indexer"].index.ntotal
+            if g["indexer"].metadata and 'cluster_id' in g["indexer"].metadata[0]:
+                has_clusters = True
         
         return AppStatus(
             dataset_root=str(g["dataset_root"]) if g.get("dataset_root") else None,
             indexed_dir=g.get("indexed_dir"),
             index_loaded=g["indexer"].index is not None,
-            indexed_image_count=count
+            indexed_image_count=count,
+            has_clusters=has_clusters
         )
+
+@app.get("/clusters", response_model=ClustersResponse)
+def get_clusters():
+    """Groups images by cluster_id and returns a summary of each cluster."""
+    if not g["indexer"].metadata or 'cluster_id' not in g["indexer"].metadata[0]:
+        raise HTTPException(status_code=404, detail="No cluster information available. Please rebuild the index.")
+
+    clusters = defaultdict(list)
+    for item in g["indexer"].metadata:
+        clusters[item['cluster_id']].append(item['path'])
+
+    response_clusters = []
+    base_path = g["indexed_dir"]
+    for cluster_id, paths in sorted(clusters.items()):
+        response_clusters.append(ClusterInfo(
+            cluster_id=cluster_id,
+            count=len(paths),
+            preview_paths=[f"{base_path}/{p}" for p in paths[:4]] # Get up to 4 previews
+        ))
+    
+    return ClustersResponse(clusters=response_clusters)
+
+@app.get("/cluster/{cluster_id}", response_model=ClusterImagesResponse)
+def get_cluster_images(cluster_id: int):
+    """Returns all image paths for a given cluster_id."""
+    if not g["indexer"].metadata or 'cluster_id' not in g["indexer"].metadata[0]:
+        raise HTTPException(status_code=404, detail="No cluster information available.")
+
+    base_path = g["indexed_dir"]
+    image_paths = [
+        f"{base_path}/{item['path']}"
+        for item in g["indexer"].metadata
+        if item['cluster_id'] == cluster_id
+    ]
+
+    if not image_paths:
+        raise HTTPException(status_code=404, detail=f"Cluster ID {cluster_id} not found.")
+
+    return ClusterImagesResponse(cluster_id=cluster_id, image_paths=image_paths)
+
 
 @app.get("/health")
 def health():
