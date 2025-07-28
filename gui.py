@@ -308,7 +308,7 @@ def launch_gui(api_url: str):
         loading_data = np.tile(loading_pixel, (THUMBNAIL_SIZE[0] * THUMBNAIL_SIZE[1], 1)).flatten()
         g["loading_texture_id"] = dpg.add_static_texture(width=THUMBNAIL_SIZE[0], height=THUMBNAIL_SIZE[1], default_value=loading_data)
 
-    setup_.ui()
+    setup_ui()
 
     dpg.create_viewport(title="CLIP Semantic Search", width=WINDOW_WIDTH, height=WINDOW_HEIGHT)
     dpg.setup_dearpygui()
