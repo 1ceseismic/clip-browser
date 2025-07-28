@@ -10,6 +10,7 @@ import math
 import subprocess
 import sys
 import config
+import colorsys
 
 # --- Constants ---
 WINDOW_WIDTH = 1280
@@ -30,6 +31,7 @@ g = {
     "loaded_textures": {}, # Cache for loaded thumbnail textures {path: texture_id}
     "loading_texture_id": None,
     "ui_update_queue": queue.Queue(),
+    "umap_series_tags": [], # To hold tags of UMAP plot series for deletion
 }
 
 # --- GUI Update Helpers ---
@@ -37,14 +39,15 @@ g = {
 def update_status(text: str, status_widget="search_status_text"):
     """Helper to update a status bar text from any thread."""
     if dpg.does_item_exist(status_widget):
-        dpg.set_value(status_widget, text)
+        g["ui_update_queue"].put((
+            lambda s, a, u: dpg.set_value(u['widget'], u['text']),
+            {'widget': status_widget, 'text': text}
+        ))
 
 # --- API Communication (threaded) ---
 
 def threaded_api_call(target, on_success=None, on_error=None, **kwargs):
     """Generic wrapper to run API calls in a background thread."""
-    # Set a default timeout for all API calls unless specified otherwise.
-    # The build-index call passes a longer timeout, which will override this.
     kwargs.setdefault('timeout', 30)
 
     def thread_target():
@@ -65,7 +68,6 @@ def threaded_api_call(target, on_success=None, on_error=None, **kwargs):
             if on_error:
                 on_error(error_message)
             else:
-                # Default to updating the main search status if no other handler
                 update_status(error_message)
 
     thread = threading.Thread(target=thread_target)
@@ -74,52 +76,73 @@ def threaded_api_call(target, on_success=None, on_error=None, **kwargs):
 
 # --- Image & Texture Loading ---
 
-def threaded_load_texture_from_disk(full_image_path: str, widget_tag: int, texture_registry_tag: int):
+def _apply_texture(sender, app_data, user_data):
     """
-    Loads a single thumbnail directly from disk in a background thread
-    and applies it to an image widget. This is the most robust method for a desktop app.
+    (Main thread) Creates a DPG texture from data and applies it to a widget.
     """
-    if full_image_path in g["loaded_textures"]:
-        if dpg.does_item_exist(widget_tag):
-            dpg.set_value(widget_tag, g["loaded_textures"][full_image_path])
+    widget_tag = user_data['widget_tag']
+    texture_data = user_data['texture_data']
+    width = user_data['width']
+    height = user_data['height']
+    full_image_path = user_data['full_image_path']
+    texture_registry_tag = user_data['texture_registry_tag']
+
+    if not dpg.does_item_exist(widget_tag) or not dpg.is_dearpygui_running():
         return
 
+    if full_image_path in g["loaded_textures"]:
+        dpg.set_value(widget_tag, g["loaded_textures"][full_image_path])
+        return
+
+    texture_id = dpg.add_static_texture(
+        width=width, height=height, default_value=texture_data, parent=texture_registry_tag
+    )
+    dpg.set_value(widget_tag, texture_id)
+    g["loaded_textures"][full_image_path] = texture_id
+
+def threaded_load_texture_from_disk(full_image_path: str, widget_tag: int, texture_registry_tag: int):
+    """
+    (Background thread) Loads image data and queues a UI update to create the texture.
+    """
     try:
         with Image.open(full_image_path) as img:
             img.thumbnail((THUMBNAIL_SIZE, THUMBNAIL_SIZE))
             img = img.convert("RGBA")
             texture_data = np.frombuffer(img.tobytes(), dtype=np.uint8) / 255.0
+            width, height = img.size
 
-        if not dpg.is_dearpygui_running(): return
-
-        texture_id = dpg.add_static_texture(
-            width=img.width, height=img.height, default_value=texture_data, parent=texture_registry_tag
-        )
-        
-        if dpg.does_item_exist(widget_tag):
-            dpg.set_value(widget_tag, texture_id)
-        g["loaded_textures"][full_image_path] = texture_id
-
+        g["ui_update_queue"].put((
+            _apply_texture,
+            {
+                'widget_tag': widget_tag,
+                'texture_data': texture_data,
+                'width': width,
+                'height': height,
+                'full_image_path': full_image_path,
+                'texture_registry_tag': texture_registry_tag
+            }
+        ))
     except Exception as e:
-        print(f"Error loading thumbnail from disk for {full_image_path}: {e}")
+        if os.path.exists(full_image_path):
+            print(f"Error processing thumbnail for {full_image_path}: {e}")
 
-def open_file_location(sender, app_data, user_data):
-    """Opens the directory containing the specified file."""
-    path = os.path.dirname(user_data)
+def open_file(sender, app_data, user_data):
+    """Opens the specified file with the default application."""
+    path = user_data
     try:
         if sys.platform == "win32":
             os.startfile(path)
         elif sys.platform == "darwin": # macOS
-            subprocess.run(["open", path])
+            subprocess.run(["open", path], check=True)
         else: # linux
-            subprocess.run(["xdg-open", path])
+            subprocess.run(["xdg-open", path], check=True)
     except Exception as e:
-        print(f"Error opening file location {path}: {e}")
+        print(f"Error opening file {path}: {e}")
+        update_status(f"Error opening file: {e}")
 
 def display_gallery_images(sender, app_data, user_data):
     """
-    Callback for the main thread. Clears and populates a gallery with image widgets
-    in a grid layout, then loads textures asynchronously from disk.
+    (Main thread) Clears and populates a gallery with image widgets.
     """
     gallery_tag = user_data["gallery_tag"]
     image_paths = user_data.get("image_paths", [])
@@ -136,51 +159,73 @@ def display_gallery_images(sender, app_data, user_data):
         return
 
     gallery_width = dpg.get_item_width(gallery_tag)
-    if gallery_width is None or gallery_width <= 0: gallery_width = WINDOW_WIDTH - 300 # Fallback
+    if gallery_width is None or gallery_width <= 0: gallery_width = WINDOW_WIDTH - 300
     items_per_row = max(1, math.floor(gallery_width / GALLERY_ITEM_WIDTH))
     
-    # Create a horizontal group for each row
     for i in range(0, len(image_paths), items_per_row):
         with dpg.group(horizontal=True, parent=gallery_tag):
-            # Add items for this row
             for j in range(i, min(i + items_per_row, len(image_paths))):
                 rel_path = image_paths[j]
                 full_path = os.path.join(g["dataset_root"], rel_path)
                 
-                with dpg.group() as item_group: # Vertical group for each item
-                    img_widget_tag = dpg.add_image(g["loading_texture_id"], width=THUMBNAIL_SIZE, height=THUMBNAIL_SIZE)
+                with dpg.group() as item_group:
+                    texture_id = g["loaded_textures"].get(full_path, g["loading_texture_id"])
+                    img_widget_tag = dpg.add_image(texture_id, width=THUMBNAIL_SIZE, height=THUMBNAIL_SIZE)
+                    
+                    if texture_id == g["loading_texture_id"]:
+                        threading.Thread(
+                            target=threaded_load_texture_from_disk, 
+                            args=(full_path, img_widget_tag, "texture_registry"),
+                            daemon=True
+                        ).start()
+
                     dpg.add_text(os.path.basename(rel_path), wrap=GALLERY_ITEM_WIDTH - 10)
                     if search_scores and j < len(search_scores):
                         dpg.add_text(f"Score: {search_scores[j]:.4f}")
                     
                     with dpg.popup(item_group):
-                        dpg.add_menu_item(label="Open File Location", callback=open_file_location, user_data=full_path)
-
-                    threading.Thread(
-                        target=threaded_load_texture_from_disk, 
-                        args=(full_path, img_widget_tag, "texture_registry"),
-                        daemon=True
-                    ).start()
+                        dpg.add_menu_item(label="Open File", callback=open_file, user_data=full_path)
 
 # --- UI Callbacks ---
 
+def _handle_status_update(data):
+    """Shared logic to update UI based on app status response."""
+    g["dataset_root"] = data.get("dataset_root")
+    g["index_loaded"] = data.get("index_loaded", False)
+
+    if g["dataset_root"]:
+        dpg.set_value("dataset_root_text", f"Current Root: {g['dataset_root']}")
+    
+    if g["dataset_root"]:
+        threaded_api_call(target=requests.get, on_success=on_get_directories_success, url=f"{API_URL}/directories")
+
+    if g["index_loaded"]:
+        dpg.enable_item("search_group")
+        load_all_images_from_api()
+        update_status(f"Loaded existing index with {data.get('indexed_image_count', 0)} images.")
+        if data.get("has_clusters"):
+            threaded_api_call(target=requests.get, on_success=on_get_clusters_success, url=f"{API_URL}/clusters")
+            load_umap_data()
+    else:
+        if g["dataset_root"]:
+             update_status("No index found. Please select a target and build an index.")
+        else:
+             update_status("Welcome! Please select a dataset root to begin.")
+
 def set_dataset_root(path: str):
-    """Sets the dataset root and triggers fetching subdirectories."""
+    """Sets the dataset root and triggers a status update."""
     if not path:
         update_status("Error: Tried to set an empty or invalid dataset path.")
         return
 
     update_status(f"Setting dataset root to: {path}...")
-    config.add_recent_path(path) # Save to recents
+    config.add_recent_path(path)
     rebuild_recent_files_menu()
 
-    def on_success(data):
-        g["dataset_root"] = path
-        dpg.set_value("dataset_root_text", f"Current Root: {path}")
-        update_status("Dataset root set. Fetching subdirectories...")
-        threaded_api_call(target=requests.get, on_success=on_get_directories_success, url=f"{API_URL}/directories")
+    def on_set_root_success(data):
+        threaded_api_call(target=requests.get, on_success=_handle_status_update, url=f"{API_URL}/status")
 
-    threaded_api_call(target=requests.post, on_success=on_success, url=f"{API_URL}/set-dataset-root", json={"path": path})
+    threaded_api_call(target=requests.post, on_success=on_set_root_success, url=f"{API_URL}/set-dataset-root", json={"path": path})
 
 def callback_select_dataset_root(sender, app_data):
     dpg.add_file_dialog(directory_selector=True, show=True, callback=callback_dataset_root_selected, tag="dataset_root_dialog", width=700, height=400, modal=True)
@@ -221,8 +266,8 @@ def callback_build_index(sender, app_data):
         dpg.enable_item("select_root_menu_item")
         dpg.enable_item("search_group")
         load_all_images_from_api()
-        # After building index, also fetch clusters
         threaded_api_call(target=requests.get, on_success=on_get_clusters_success, url=f"{API_URL}/clusters")
+        load_umap_data()
 
     def on_error(error_message):
         update_status(f"Error building index: {error_message}")
@@ -274,25 +319,31 @@ def load_all_images_from_api():
         ))
     threaded_api_call(target=requests.get, on_success=on_success, url=f"{API_URL}/all-images")
 
-# --- Cluster Callbacks ---
+# --- Cluster & UMAP Callbacks ---
 def on_get_clusters_success(data):
     clusters = data.get("clusters", [])
-    dpg.delete_item("cluster_sidebar", children_only=True) # Clear old clusters
+    g["ui_update_queue"].put((
+        lambda s, a, u: dpg.delete_item("cluster_sidebar", children_only=True), None
+    ))
     if not clusters:
-        dpg.add_text("No clusters found.", parent="cluster_sidebar")
+        g["ui_update_queue"].put((
+            lambda s, a, u: dpg.add_text("No clusters found.", parent="cluster_sidebar"), None
+        ))
         return
     
     for cluster in clusters:
-        with dpg.group(parent="cluster_sidebar"):
-            label = f"Cluster {cluster['cluster_id']} ({cluster['count']} images)"
-            with dpg.collapsing_header(label=label, default_open=True):
-                dpg.add_button(label="View All", callback=callback_view_cluster, user_data=cluster['cluster_id'], width=-1)
-                with dpg.group(horizontal=True):
-                    for i, path in enumerate(cluster['preview_paths']):
-                        # Small preview images
-                        img_widget = dpg.add_image(g["loading_texture_id"], width=50, height=50)
-                        full_path = os.path.join(g["dataset_root"], path)
-                        threading.Thread(target=threaded_load_texture_from_disk, args=(full_path, img_widget, "texture_registry"), daemon=True).start()
+        g["ui_update_queue"].put((_create_cluster_card, cluster))
+
+def _create_cluster_card(sender, app_data, cluster):
+    with dpg.group(parent="cluster_sidebar"):
+        label = f"Cluster {cluster['cluster_id']} ({cluster['count']} images)"
+        with dpg.collapsing_header(label=label, default_open=True):
+            dpg.add_button(label="View All", callback=callback_view_cluster, user_data=cluster['cluster_id'], width=-1)
+            with dpg.group(horizontal=True):
+                for path in cluster['preview_paths']:
+                    img_widget = dpg.add_image(g["loading_texture_id"], width=50, height=50)
+                    full_path = os.path.join(g["dataset_root"], path)
+                    threading.Thread(target=threaded_load_texture_from_disk, args=(full_path, img_widget, "texture_registry"), daemon=True).start()
 
 def callback_view_cluster(sender, app_data, user_data):
     cluster_id = user_data
@@ -308,29 +359,76 @@ def callback_view_cluster(sender, app_data, user_data):
 
     threaded_api_call(target=requests.get, on_success=on_success, url=f"{API_URL}/cluster/{cluster_id}")
 
+def _get_cluster_colors(num_colors):
+    colors = []
+    for i in range(num_colors):
+        hue = i / num_colors
+        rgb = colorsys.hsv_to_rgb(hue, 0.85, 0.9)
+        colors.append([int(rgb[0]*255), int(rgb[1]*255), int(rgb[2]*255)])
+    return colors
+
+def _update_umap_plot(metadata):
+    if not dpg.does_item_exist("umap_plot"): return
+
+    for tag in g["umap_series_tags"]:
+        if dpg.does_item_exist(tag):
+            dpg.delete_item(tag)
+    g["umap_series_tags"].clear()
+
+    if not metadata:
+        update_status("No UMAP data to display.", "umap_status_text")
+        return
+
+    clusters = {}
+    for item in metadata:
+        if 'umap' not in item or not item['umap']: continue
+        cid = item.get('cluster_id', -1)
+        if cid not in clusters:
+            clusters[cid] = {'x': [], 'y': []}
+        clusters[cid]['x'].append(item['umap'][0])
+        clusters[cid]['y'].append(item['umap'][1])
+
+    if not clusters:
+        update_status("No valid UMAP coordinates in metadata.", "umap_status_text")
+        return
+
+    cluster_ids = sorted(clusters.keys())
+    colors = _get_cluster_colors(len(cluster_ids))
+    color_map = {cid: colors[i % len(colors)] for i, cid in enumerate(cluster_ids)}
+
+    for cid in cluster_ids:
+        data = clusters[cid]
+        series_tag = dpg.add_scatter_series(x=data['x'], y=data['y'], label=f"Cluster {cid}", parent="umap_plot_y_axis")
+        g["umap_series_tags"].append(series_tag)
+        
+        theme = dpg.generate_uuid()
+        with dpg.theme(tag=theme):
+            with dpg.theme_component(dpg.mvScatterSeries):
+                dpg.add_theme_color(dpg.mvPlotCol_Line, color_map[cid], category=dpg.mvThemeCat_Plots)
+        dpg.bind_item_theme(series_tag, theme)
+    
+    update_status(f"Displayed {len(metadata)} points across {len(clusters)} clusters.", "umap_status_text")
+
+def _on_get_umap_data_success(data):
+    metadata = data.get("metadata", [])
+    g["ui_update_queue"].put((lambda s, a, u: _update_umap_plot(u), metadata))
+
+def load_umap_data():
+    update_status("Loading UMAP data...", "umap_status_text")
+    threaded_api_call(
+        target=requests.get,
+        on_success=_on_get_umap_data_success,
+        on_error=lambda e: update_status(f"Could not load UMAP data: {e}. Requires new API endpoint.", "umap_status_text"),
+        url=f"{API_URL}/all-metadata"
+    )
+
 # --- App Initialization ---
 
-def on_initial_status_success(data):
-    g["dataset_root"] = data.get("dataset_root")
-    g["index_loaded"] = data.get("index_loaded", False)
-    
-    if g["dataset_root"]:
-        # This will also rebuild the recent files menu
-        set_dataset_root(g["dataset_root"])
-    
-    if g["index_loaded"]:
-        dpg.enable_item("search_group")
-        load_all_images_from_api()
-        update_status(f"Loaded existing index with {data.get('indexed_image_count', 0)} images.")
-        if data.get("has_clusters"):
-            threaded_api_call(target=requests.get, on_success=on_get_clusters_success, url=f"{API_URL}/clusters")
-    else:
-        update_status("Welcome! Please select a dataset root to begin.")
-
 def initialize_app_state():
-    threaded_api_call(target=requests.get, on_success=on_initial_status_success, url=f"{API_URL}/status")
+    threaded_api_call(target=requests.get, on_success=_handle_status_update, url=f"{API_URL}/status")
 
 def rebuild_recent_files_menu():
+    if not dpg.does_item_exist("recent_files_menu"): return
     dpg.delete_item("recent_files_menu", children_only=True)
     recent_paths = config.get_recent_paths()
     if not recent_paths:
@@ -378,6 +476,20 @@ def setup_ui():
                 dpg.add_separator()
                 dpg.add_text("Status", tag="cluster_status_text")
 
+            with dpg.tab(label="UMAP Visualization"):
+                with dpg.group(horizontal=True):
+                    with dpg.child_window(width=-270):
+                        with dpg.plot(label="UMAP 2D Projection", height=-1, width=-1, tag="umap_plot"):
+                            dpg.add_plot_legend()
+                            dpg.add_plot_axis(dpg.mvXAxis, label="UMAP 1", tag="umap_plot_x_axis")
+                            dpg.add_plot_axis(dpg.mvYAxis, label="UMAP 2", tag="umap_plot_y_axis")
+                    with dpg.child_window(width=250):
+                        dpg.add_text("Image Preview")
+                        dpg.add_text("(Hover not yet implemented)", color=(255, 255, 0))
+                        dpg.add_image(g["loading_texture_id"], tag="umap_preview_image", width=240, height=240)
+                dpg.add_separator()
+                dpg.add_text("Status", tag="umap_status_text")
+
             with dpg.tab(label="Training"):
                 dpg.add_text("Training and data augmentation UI will be implemented here.")
 
@@ -388,8 +500,8 @@ def launch_gui(api_url: str):
     dpg.create_context()
     
     with dpg.texture_registry(tag="texture_registry"):
-        loading_pixel = np.array([0.5, 0.5, 0.5, 1.0]) # RGBA
-        loading_data = np.tile(loading_pixel, (THUMBNAIL_SIZE, THUMBNAIL_SIZE, 1)).flatten()
+        loading_pixel = np.array([0.3, 0.3, 0.3, 1.0])
+        loading_data = np.tile(loading_pixel, (THUMBNAIL_SIZE, THUMBNAIL_SIZE, 1))
         g["loading_texture_id"] = dpg.add_static_texture(width=THUMBNAIL_SIZE, height=THUMBNAIL_SIZE, default_value=loading_data)
 
     setup_ui()
@@ -406,7 +518,8 @@ def launch_gui(api_url: str):
         try:
             while not g["ui_update_queue"].empty():
                 callback, user_data = g["ui_update_queue"].get_nowait()
-                callback(None, None, user_data)
+                if callback:
+                    callback(None, None, user_data)
         except queue.Empty:
             pass
 
