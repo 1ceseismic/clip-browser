@@ -207,7 +207,7 @@ def _handle_status_update(sender, app_data, user_data):
         else:
              update_status("Welcome! Please select a dataset root to begin.")
 
-def _clear_main_views():
+def _clear_main_views(sender, app_data, user_data):
     """(Main Thread) Clears all data views in the UI to prepare for new data."""
     if dpg.does_item_exist("search_gallery"):
         dpg.delete_item("search_gallery", children_only=True)
@@ -231,7 +231,7 @@ def set_dataset_root(path: str):
     update_status(f"Setting dataset root to: {path}...")
     
     # Clear existing UI state before loading new data
-    g["ui_update_queue"].put((lambda s,a,u: _clear_main_views(), None))
+    g["ui_update_queue"].put((_clear_main_views, None))
 
     config.add_recent_path(path)
     rebuild_recent_files_menu()
@@ -442,11 +442,17 @@ def status_poller():
     and triggering a UI update only when the state changes.
     """
     last_known_status = {"index_loaded": None, "dataset_root": None}
+    server_was_connected = False # Track connection state
+
     while dpg.is_dearpygui_running():
         try:
             response = requests.get(f"{API_URL}/status", timeout=5)
             response.raise_for_status()
             current_status = response.json()
+
+            if not server_was_connected:
+                server_was_connected = True
+                print("Successfully connected to server.")
 
             # Check if the relevant state has changed
             if (current_status.get("index_loaded") != last_known_status.get("index_loaded") or
@@ -457,11 +463,17 @@ def status_poller():
                 g["ui_update_queue"].put((_handle_status_update, current_status))
 
         except requests.RequestException:
-            # Don't spam logs, just update status bar if connection is lost
-            if g.get("index_loaded") is not None: # Check if it was ever loaded
+            if server_was_connected:
+                # We were connected, but now we're not.
                 update_status("Connection to server lost. Reconnecting...")
-                g["index_loaded"] = None # Force a refresh on reconnect
+                server_was_connected = False
+                # Reset state to force a full UI refresh on reconnect
+                g["index_loaded"] = None 
                 last_known_status = {"index_loaded": None, "dataset_root": None}
+                g["ui_update_queue"].put((_clear_main_views, None))
+            else:
+                # Still trying to connect for the first time.
+                update_status("Connecting to server...")
 
         time.sleep(2) # Poll every 2 seconds
 

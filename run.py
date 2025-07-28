@@ -47,42 +47,23 @@ def stop_server():
         # The daemon thread will exit shortly after this.
         # We don't join it here as atexit handlers have limitations.
 
-def wait_for_server():
-    """Waits for the server to become responsive."""
-    start_time = time.time()
-    while time.time() - start_time < 20:  # 20-second timeout
-        try:
-            # Use a short timeout for each request
-            response = requests.get(f"{API_URL}/health", timeout=1)
-            if response.status_code == 200:
-                print("Server is up and running.")
-                return True
-        except requests.ConnectionError:
-            # Server is not up yet, wait a bit
-            time.sleep(0.5)
-        except requests.Timeout:
-            # Server is busy or slow, but it's there. Keep waiting.
-            pass
-    print("Error: Server did not start within the timeout period.")
-    return False
-
 
 if __name__ == "__main__":
     # Register the cleanup function to run when the script exits.
     # This is the key to preventing the "address already in use" error.
     atexit.register(stop_server)
 
+    # Start the server in the background.
     start_server()
 
-    if wait_for_server():
-        try:
-            # Import and launch the GUI only after the server is confirmed to be running
-            from gui import launch_gui
-            launch_gui(api_url=API_URL)
-        except Exception as e:
-            print(f"An error occurred while running the GUI: {e}")
-    else:
-        print("Could not start the GUI because the server failed to start.")
+    # Launch the GUI immediately without waiting for the server.
+    # The GUI's internal poller will handle the connection status.
+    print("Launching GUI...")
+    try:
+        from gui import launch_gui
+        launch_gui(api_url=API_URL)
+    except Exception as e:
+        print(f"An error occurred while running the GUI: {e}")
 
     # When the GUI window is closed, the main thread will exit.
     # The atexit handler will run, signaling the daemon server thread to stop.
