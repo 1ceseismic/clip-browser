@@ -51,6 +51,7 @@ class SearchResponse(BaseModel):
 class AppStatus(BaseModel):
     dataset_root: Optional[str]
     indexed_dir: Optional[str]
+    model_loaded: bool
     index_loaded: bool
     indexed_image_count: int
     has_clusters: bool
@@ -290,7 +291,8 @@ def get_status():
     with _resource_lock:
         count = 0
         has_clusters = False
-        index_loaded = g["indexer"] is not None and g["indexer"].index is not None
+        model_loaded = g["indexer"] is not None
+        index_loaded = model_loaded and g["indexer"].index is not None
         
         if index_loaded:
             count = g["indexer"].index.ntotal
@@ -300,6 +302,7 @@ def get_status():
         return AppStatus(
             dataset_root=str(g["dataset_root"]) if g.get("dataset_root") else None,
             indexed_dir=g.get("indexed_dir"),
+            model_loaded=model_loaded,
             index_loaded=index_loaded,
             indexed_image_count=count,
             has_clusters=has_clusters

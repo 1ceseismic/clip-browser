@@ -28,6 +28,7 @@ g = {
     "selected_subdir": None,
     "is_indexing": False,
     "is_searching": False,
+    "model_loaded": False,
     "index_loaded": False,
     "loading_texture_id": None,
     "ui_update_queue": queue.Queue(),
@@ -186,12 +187,13 @@ def _handle_status_update(sender, app_data, user_data):
     """Shared logic to update UI based on app status response."""
     data = user_data
     g["dataset_root"] = data.get("dataset_root")
+    g["model_loaded"] = data.get("model_loaded", False)
     g["index_loaded"] = data.get("index_loaded", False)
 
     if g["dataset_root"]:
         dpg.set_value("dataset_root_text", f"Current Root: {g['dataset_root']}")
     
-    if g["dataset_root"]:
+    if g["dataset_root"] and g["model_loaded"]:
         threaded_api_call(target=requests.get, on_success=on_get_directories_success, url=f"{API_URL}/directories")
 
     if g["index_loaded"]:
@@ -202,10 +204,13 @@ def _handle_status_update(sender, app_data, user_data):
             threaded_api_call(target=requests.get, on_success=on_get_clusters_success, url=f"{API_URL}/clusters")
             load_umap_data()
     else:
-        if g["dataset_root"]:
-             update_status("Loading model and index...")
+        dpg.disable_item("search_group")
+        if not g["model_loaded"]:
+            update_status("Loading model, please wait...")
+        elif not g["dataset_root"]:
+             update_status("Model loaded. Please select a dataset root to begin.")
         else:
-             update_status("Welcome! Please select a dataset root to begin.")
+             update_status("Model loaded. No index found for this root. Please build an index.")
 
 def _clear_main_views(sender, app_data, user_data):
     """(Main Thread) Clears all data views in the UI to prepare for new data."""
@@ -262,7 +267,8 @@ def on_get_directories_success(data):
         g["selected_subdir"] = g["subdirectories"][0]
         dpg.set_value("subdir_selector", g["selected_subdir"])
     
-    dpg.enable_item("build_index_button")
+    if g.get("model_loaded"):
+        dpg.enable_item("build_index_button")
     dpg.enable_item("subdir_selector")
 
 def callback_build_index(sender, app_data):
@@ -441,7 +447,7 @@ def status_poller():
     Runs in a background thread, periodically checking the server status
     and triggering a UI update only when the state changes.
     """
-    last_known_status = {"index_loaded": None, "dataset_root": None}
+    last_known_status = {"model_loaded": None, "index_loaded": None, "dataset_root": None}
     server_was_connected = False # Track connection state
 
     while dpg.is_dearpygui_running():
@@ -455,7 +461,8 @@ def status_poller():
                 print("Successfully connected to server.")
 
             # Check if the relevant state has changed
-            if (current_status.get("index_loaded") != last_known_status.get("index_loaded") or
+            if (current_status.get("model_loaded") != last_known_status.get("model_loaded") or
+                current_status.get("index_loaded") != last_known_status.get("index_loaded") or
                 current_status.get("dataset_root") != last_known_status.get("dataset_root")):
                 
                 print(f"Status changed: {current_status}. Triggering UI update.")
@@ -468,8 +475,9 @@ def status_poller():
                 update_status("Connection to server lost. Reconnecting...")
                 server_was_connected = False
                 # Reset state to force a full UI refresh on reconnect
+                g["model_loaded"] = False
                 g["index_loaded"] = None 
-                last_known_status = {"index_loaded": None, "dataset_root": None}
+                last_known_status = {"model_loaded": None, "index_loaded": None, "dataset_root": None}
                 g["ui_update_queue"].put((_clear_main_views, None))
             else:
                 # Still trying to connect for the first time.
