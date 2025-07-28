@@ -197,16 +197,32 @@ def _update_score_distribution_plot(sender, app_data, user_data):
 
     if not scores:
         dpg.set_axis_limits(x_axis_tag, 0, 1)
+        dpg.set_axis_limits(y_axis_tag, 0, 1) # Reset to default
         return
 
     x_data = list(range(len(scores)))
     
-    # Add new series
-    g["score_plot_series_tag"] = dpg.add_bar_series(x_data, scores, label="Scores", parent=y_axis_tag, weight=0.5)
+    # Add new series with wider bars to reduce space between them
+    g["score_plot_series_tag"] = dpg.add_bar_series(x_data, scores, label="Scores", parent=y_axis_tag, weight=0.8)
     
-    # Fit axes to data
+    # Fit X axis to data
     dpg.set_axis_limits(x_axis_tag, -0.5, len(scores) - 0.5)
-    # The Y axis is already fixed from 0 to 1, which is good.
+
+    # Dynamically fit Y axis to data
+    min_score = min(scores)
+    max_score = max(scores)
+    score_range = max_score - min_score
+    
+    # Add padding to the y-axis to avoid bars touching the plot edges
+    if score_range < 1e-6: # Handle case where all scores are the same
+        padding = 0.1
+    else:
+        padding = score_range * 0.1
+        
+    y_min = min_score - padding
+    y_max = max_score + padding
+    
+    dpg.set_axis_limits(y_axis_tag, y_min, y_max)
 
 def _handle_status_update(sender, app_data, user_data):
     """Shared logic to update UI based on app status response."""
@@ -561,10 +577,9 @@ def setup_ui():
                         dpg.add_input_int(tag="top_k_input", label="Top K", width=100, default_value=10, min_value=1, max_value=100)
                         dpg.add_button(label="Search", callback=callback_search)
                 dpg.add_separator()
-                with dpg.plot(label="Score Distribution", height=150, width=-1, tag="score_plot"):
+                with dpg.plot(label="Score Distribution", height=120, width=-1, tag="score_plot"):
                     dpg.add_plot_axis(dpg.mvXAxis, label="Result Rank", tag="score_plot_x_axis")
-                    y_axis = dpg.add_plot_axis(dpg.mvYAxis, label="Similarity Score", tag="score_plot_y_axis")
-                    dpg.set_axis_limits(y_axis, 0.0, 1.0)
+                    dpg.add_plot_axis(dpg.mvYAxis, label="Similarity Score", tag="score_plot_y_axis")
                 dpg.add_separator()
                 with dpg.child_window(tag="search_gallery", width=-1):
                     dpg.add_text("Build an index or perform a search to see images here.")
