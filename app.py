@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 import json
 from PIL import Image
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Any
 from collections import defaultdict
 import config
 
@@ -67,6 +67,9 @@ class ClustersResponse(BaseModel):
 class ClusterImagesResponse(BaseModel):
     cluster_id: int
     image_paths: List[str]
+
+class AllMetadataResponse(BaseModel):
+    metadata: List[Dict[str, Any]]
 
 
 # --- API Endpoints ---
@@ -205,6 +208,15 @@ def get_all_images():
     base_path = g["indexed_dir"]
     full_paths = [f"{base_path}/{item['path']}" for item in g["indexer"].metadata]
     return {"images": full_paths}
+
+@app.get("/all-metadata", response_model=AllMetadataResponse)
+def get_all_metadata():
+    """Returns the complete metadata list for all indexed items, including UMAP and cluster data."""
+    if not g["indexer"].metadata:
+        return {"metadata": []}
+    
+    # The metadata is already a list of dicts, which is what we need.
+    return {"metadata": g["indexer"].metadata}
 
 @app.get("/status", response_model=AppStatus)
 def get_status():
