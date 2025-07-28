@@ -198,7 +198,13 @@ def callback_search(sender, app_data):
         scores = [r["score"] for r in results]
         update_status(f"Found {len(results)} results for '{query}'.")
         # Schedule the UI update on the main thread
-        dpg.submit_callback(display_gallery_images, user_data={"image_paths": paths, "search_scores": scores})
+        dpg.add_button(
+            label="Display Gallery",
+            parent="results_gallery",
+            callback=display_gallery_images,
+            user_data={"image_paths": paths}
+        )
+
         g["is_searching"] = False
         dpg.enable_item("search_group")
 
@@ -216,7 +222,13 @@ def load_all_images_from_api():
         paths = data.get("images", [])
         update_status(f"Displaying {len(paths)} images.")
         # Schedule the UI update on the main thread
-        dpg.submit_callback(display_gallery_images, user_data={"image_paths": paths})
+        dpg.add_button(
+            parent="results_gallery",
+            label="Display Gallery",
+            callback=display_gallery_images,
+            user_data={"image_paths": paths}
+        )
+
 
     threaded_api_call(target=requests.get, on_success=on_success, url=f"{API_URL}/all-images")
 
