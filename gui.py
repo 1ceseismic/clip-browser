@@ -132,30 +132,31 @@ def display_gallery_images(sender, app_data, user_data):
         return
 
     gallery_width = dpg.get_item_width(gallery_tag)
-    if gallery_width <= 0: gallery_width = WINDOW_WIDTH - 300 # Fallback
+    if gallery_width is None or gallery_width <= 0: gallery_width = WINDOW_WIDTH - 300 # Fallback
     items_per_row = max(1, math.floor(gallery_width / GALLERY_ITEM_WIDTH))
     
-    for i, rel_path in enumerate(image_paths):
-        # Add same_line for all items except the first in each row
-        if i % items_per_row != 0:
-            dpg.add_same_line(parent=gallery_tag)
+    # Create a horizontal group for each row
+    for i in range(0, len(image_paths), items_per_row):
+        with dpg.group(horizontal=True, parent=gallery_tag):
+            # Add items for this row
+            for j in range(i, min(i + items_per_row, len(image_paths))):
+                rel_path = image_paths[j]
+                full_path = os.path.join(g["dataset_root"], rel_path)
+                
+                with dpg.group() as item_group: # Vertical group for each item
+                    img_widget_tag = dpg.add_image(g["loading_texture_id"], width=THUMBNAIL_SIZE, height=THUMBNAIL_SIZE)
+                    dpg.add_text(os.path.basename(rel_path), wrap=GALLERY_ITEM_WIDTH - 10)
+                    if search_scores and j < len(search_scores):
+                        dpg.add_text(f"Score: {search_scores[j]:.4f}")
+                    
+                    with dpg.popup(item_group):
+                        dpg.add_menu_item(label="Open File Location", callback=open_file_location, user_data=full_path)
 
-        full_path = os.path.join(g["dataset_root"], rel_path)
-        
-        with dpg.group(parent=gallery_tag) as item_group:
-            img_widget_tag = dpg.add_image(g["loading_texture_id"], width=THUMBNAIL_SIZE, height=THUMBNAIL_SIZE)
-            dpg.add_text(os.path.basename(rel_path), wrap=GALLERY_ITEM_WIDTH - 10)
-            if search_scores:
-                dpg.add_text(f"Score: {search_scores[i]:.4f}")
-            
-            with dpg.popup(item_group):
-                dpg.add_menu_item(label="Open File Location", callback=open_file_location, user_data=full_path)
-
-            threading.Thread(
-                target=threaded_load_texture_from_disk, 
-                args=(full_path, img_widget_tag, "texture_registry"),
-                daemon=True
-            ).start()
+                    threading.Thread(
+                        target=threaded_load_texture_from_disk, 
+                        args=(full_path, img_widget_tag, "texture_registry"),
+                        daemon=True
+                    ).start()
 
 # --- UI Callbacks ---
 
