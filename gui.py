@@ -108,7 +108,8 @@ def threaded_load_texture_from_disk(full_image_path: str, widget_tag: int, textu
         with Image.open(full_image_path) as img:
             img.thumbnail((THUMBNAIL_SIZE, THUMBNAIL_SIZE))
             img = img.convert("RGBA")
-            texture_data = np.frombuffer(img.tobytes(), dtype=np.uint8) / 255.0
+            # Ensure data is float32, as DPG expects. This is a critical fix.
+            texture_data = (np.frombuffer(img.tobytes(), dtype=np.uint8) / 255.0).astype(np.float32)
             width, height = img.size
 
         g["ui_update_queue"].put((
@@ -427,6 +428,11 @@ def load_umap_data():
 def initialize_app_state():
     threaded_api_call(target=requests.get, on_success=_handle_status_update, url=f"{API_URL}/status")
 
+def callback_set_recent_root(sender, app_data, user_data):
+    """Callback for recent file menu items to set the dataset root."""
+    if user_data:
+        set_dataset_root(user_data)
+
 def rebuild_recent_files_menu():
     if not dpg.does_item_exist("recent_files_menu"): return
     dpg.delete_item("recent_files_menu", children_only=True)
@@ -435,7 +441,7 @@ def rebuild_recent_files_menu():
         dpg.add_text("No recent paths", parent="recent_files_menu")
         return
     for path in recent_paths:
-        dpg.add_menu_item(label=path, parent="recent_files_menu", callback=lambda s, a, p=path: set_dataset_root(p))
+        dpg.add_menu_item(label=path, parent="recent_files_menu", callback=callback_set_recent_root, user_data=path)
 
 # --- UI Setup ---
 
@@ -500,9 +506,11 @@ def launch_gui(api_url: str):
     dpg.create_context()
     
     with dpg.texture_registry(tag="texture_registry"):
-        loading_pixel = np.array([0.3, 0.3, 0.3, 1.0])
+        loading_pixel = np.array([0.3, 0.3, 0.3, 1.0], dtype=np.float32)
         loading_data = np.tile(loading_pixel, (THUMBNAIL_SIZE, THUMBNAIL_SIZE, 1))
-        g["loading_texture_id"] = dpg.add_static_texture(width=THUMBNAIL_SIZE, height=THUMBNAIL_SIZE, default_value=loading_data)
+        g["loading_texture_id"] = dpg.add_static_texture(
+            width=THUMBNAIL_SIZE, height=THUMBNAIL_SIZE, default_value=loading_data.flatten()
+        )
 
     setup_ui()
     rebuild_recent_files_menu()
