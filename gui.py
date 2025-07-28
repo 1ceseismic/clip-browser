@@ -2,10 +2,14 @@ import dearpygui.dearpygui as dpg
 import requests
 import threading
 import os
+import io
+import numpy as np
+from PIL import Image
 
 # --- Constants ---
 WINDOW_WIDTH = 1280
 WINDOW_HEIGHT = 720
+THUMBNAIL_SIZE = (128, 128)
 
 # --- Global State ---
 API_URL = ""
@@ -14,8 +18,12 @@ g = {
     "dataset_root": None,
     "subdirectories": [],
     "selected_subdir": None,
-    "status_text": "Welcome! Please select a dataset root directory.",
+    "status_text": "Initializing...",
     "is_indexing": False,
+    "is_searching": False,
+    "index_loaded": False,
+    "loaded_textures": {}, # Cache for loaded thumbnail textures {path: texture_id}
+    "loading_texture_id": None,
 }
 
 # --- API Communication (threaded) ---
@@ -29,11 +37,9 @@ def threaded_api_call(target, on_success=None, on_error=None, **kwargs):
     """Generic wrapper to run API calls in a background thread."""
     def thread_target():
         try:
-            # The 'target' is a function like requests.post
             response = target(**kwargs)
             response.raise_for_status()
             if on_success:
-                # Pass the JSON response to the success callback
                 on_success(response.json())
         except requests.RequestException as e:
             error_message = f"API Error: {e}"
@@ -42,7 +48,7 @@ def threaded_api_call(target, on_success=None, on_error=None, **kwargs):
                     detail = e.response.json().get("detail", e.response.text)
                     error_message = f"API Error ({e.response.status_code}): {detail}"
                 except requests.exceptions.JSONDecodeError:
-                    pass # Use the original error message
+                    pass
             print(error_message)
             if on_error:
                 on_error(error_message)
@@ -53,22 +59,63 @@ def threaded_api_call(target, on_success=None, on_error=None, **kwargs):
     thread.daemon = True
     thread.start()
 
-# --- Callbacks for UI actions ---
+# --- Image & Texture Loading ---
+
+def threaded_load_texture(image_path: str, widget_tag: int, texture_registry_tag: int):
+    """Loads a single thumbnail image in a background thread and applies it to an image widget."""
+    if image_path in g["loaded_textures"]:
+        dpg.set_value(widget_tag, g["loaded_textures"][image_path])
+        return
+    try:
+        url = f"{API_URL}/thumbnail/{image_path}"
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        
+        with Image.open(io.BytesIO(response.content)) as img:
+            img = img.convert("RGBA")
+            # DearPyGui requires texture data as a 1D float array
+            texture_data = np.frombuffer(img.tobytes(), dtype=np.uint8) / 255.0
+
+        # dpg texture calls are thread-safe
+        with dpg.texture_registry(tag=texture_registry_tag):
+            texture_id = dpg.add_static_texture(width=img.width, height=img.height, default_value=texture_data)
+        
+        dpg.set_value(widget_tag, texture_id)
+        g["loaded_textures"][image_path] = texture_id
+    except Exception as e:
+        print(f"Error loading thumbnail for {image_path}: {e}")
+        # Optionally set a 'failed to load' texture here
+
+def display_gallery_images(image_paths: list, search_scores: list = None):
+    """Clears and populates the gallery with image widgets, then loads textures asynchronously."""
+    dpg.delete_item("results_gallery", children_only=True)
+    
+    if not image_paths:
+        dpg.add_text("No images found.", parent="results_gallery")
+        return
+
+    for i, path in enumerate(image_paths):
+        with dpg.group(horizontal=True, parent="results_gallery"):
+            img_widget_tag = dpg.add_image(g["loading_texture_id"], width=THUMBNAIL_SIZE[0], height=THUMBNAIL_SIZE[1])
+            
+            with dpg.group():
+                # Use a wrap value to prevent long paths from stretching the UI
+                dpg.add_text(os.path.basename(path), wrap=400)
+                if search_scores:
+                    dpg.add_text(f"Score: {search_scores[i]:.4f}")
+            
+            threading.Thread(
+                target=threaded_load_texture, 
+                args=(path, img_widget_tag, "texture_registry"),
+                daemon=True
+            ).start()
+
+# --- UI Callbacks ---
 
 def callback_select_dataset_root(sender, app_data):
-    """Opens the directory selection dialog."""
-    dpg.add_file_dialog(
-        directory_selector=True,
-        show=True,
-        callback=callback_dataset_root_selected,
-        tag="dataset_root_dialog",
-        width=700, height=400,
-        modal=True
-    )
+    dpg.add_file_dialog(directory_selector=True, show=True, callback=callback_dataset_root_selected, tag="dataset_root_dialog", width=700, height=400, modal=True)
 
 def callback_dataset_root_selected(sender, app_data):
-    """Handles the response from the directory selection dialog."""
-    # Check if a path was selected (and not cancelled)
     if 'file_path_name' in app_data and app_data['file_path_name']:
         path = app_data['file_path_name']
         update_status(f"Setting dataset root to: {path}...")
@@ -77,26 +124,15 @@ def callback_dataset_root_selected(sender, app_data):
             g["dataset_root"] = path
             dpg.set_value("dataset_root_text", f"Current Root: {path}")
             update_status("Dataset root set. Fetching subdirectories...")
-            # Now fetch the subdirectories
-            threaded_api_call(
-                target=requests.get,
-                on_success=on_get_directories_success,
-                url=f"{API_URL}/directories"
-            )
+            threaded_api_call(target=requests.get, on_success=on_get_directories_success, url=f"{API_URL}/directories")
 
-        threaded_api_call(
-            target=requests.post,
-            on_success=on_success,
-            url=f"{API_URL}/set-dataset-root",
-            json={"path": path}
-        )
+        threaded_api_call(target=requests.post, on_success=on_success, url=f"{API_URL}/set-dataset-root", json={"path": path})
 
 def on_get_directories_success(data):
-    """Handles successful fetching of subdirectories."""
     g["subdirectories"] = data.get("directories", [])
     if not g["subdirectories"]:
         update_status("No subdirectories with images found. You can index the root.")
-        g["subdirectories"] = ['.'] # Add root if no other dirs
+        g["subdirectories"] = ['.']
     else:
         update_status("Subdirectories loaded. Please select one to index.")
 
@@ -108,12 +144,8 @@ def on_get_directories_success(data):
     dpg.enable_item("build_index_button")
     dpg.enable_item("subdir_selector")
 
-
 def callback_build_index(sender, app_data):
-    """Starts the indexing process for the selected subdirectory."""
-    if not g["selected_subdir"] or g["is_indexing"]:
-        return
-
+    if not g["selected_subdir"] or g["is_indexing"]: return
     g["is_indexing"] = True
     dpg.disable_item("build_index_button")
     dpg.disable_item("select_root_button")
@@ -121,11 +153,13 @@ def callback_build_index(sender, app_data):
 
     def on_success(data):
         total = data.get('total', 'N/A')
-        update_status(f"Index built successfully for '{g['selected_subdir']}' with {total} images.")
+        update_status(f"Index built successfully with {total} images. Loading gallery...")
         g["is_indexing"] = False
+        g["index_loaded"] = True
         dpg.enable_item("build_index_button")
         dpg.enable_item("select_root_button")
-        # TODO: Trigger loading of all images into the gallery view
+        dpg.enable_item("search_group")
+        load_all_images_from_api()
 
     def on_error(error_message):
         update_status(f"Error building index: {error_message}")
@@ -133,90 +167,134 @@ def callback_build_index(sender, app_data):
         dpg.enable_item("build_index_button")
         dpg.enable_item("select_root_button")
 
-    threaded_api_call(
-        target=requests.post,
-        on_success=on_success,
-        on_error=on_error,
-        url=f"{API_URL}/build-index",
-        params={"img_dir": g["selected_subdir"]},
-        timeout=600 # 10 minute timeout for indexing
-    )
+    threaded_api_call(target=requests.post, on_success=on_success, on_error=on_error, url=f"{API_URL}/build-index", params={"img_dir": g["selected_subdir"]}, timeout=600)
 
 def callback_subdir_selected(sender, app_data):
-    """Stores the selected subdirectory from the dropdown."""
     g["selected_subdir"] = app_data
+
+def callback_search(sender, app_data):
+    if g["is_searching"] or not g["index_loaded"]: return
+    g["is_searching"] = True
+    update_status("Searching...")
+    dpg.disable_item("search_group")
+
+    query = dpg.get_value("search_input")
+    top_k = dpg.get_value("top_k_input")
+
+    def on_success(data):
+        results = data.get("results", [])
+        paths = [r["path"] for r in results]
+        scores = [r["score"] for r in results]
+        update_status(f"Found {len(results)} results for '{query}'.")
+        display_gallery_images(paths, search_scores=scores)
+        g["is_searching"] = False
+        dpg.enable_item("search_group")
+
+    def on_error(error_message):
+        update_status(f"Search error: {error_message}")
+        g["is_searching"] = False
+        dpg.enable_item("search_group")
+
+    threaded_api_call(target=requests.get, on_success=on_success, on_error=on_error, url=f"{API_URL}/search", params={"q": query, "top_k": top_k})
+
+def load_all_images_from_api():
+    """Fetches all image paths from the index and displays them."""
+    update_status("Loading all indexed images...")
+    def on_success(data):
+        paths = data.get("images", [])
+        update_status(f"Displaying {len(paths)} images.")
+        display_gallery_images(paths)
+
+    threaded_api_call(target=requests.get, on_success=on_success, url=f"{API_URL}/all-images")
+
+# --- App Initialization ---
+
+def on_initial_status_success(data):
+    """Callback to configure UI based on initial server status."""
+    g["dataset_root"] = data.get("dataset_root")
+    g["index_loaded"] = data.get("index_loaded", False)
+    
+    if g["dataset_root"]:
+        dpg.set_value("dataset_root_text", f"Current Root: {g['dataset_root']}")
+        threaded_api_call(target=requests.get, on_success=on_get_directories_success, url=f"{API_URL}/directories")
+    
+    if g["index_loaded"]:
+        dpg.enable_item("search_group")
+        load_all_images_from_api()
+        update_status(f"Loaded existing index with {data.get('indexed_image_count', 0)} images.")
+    else:
+        update_status("Welcome! Please select a dataset root to begin.")
+
+def initialize_app_state():
+    """Fetches initial status from the backend to set up the UI."""
+    threaded_api_call(target=requests.get, on_success=on_initial_status_success, url=f"{API_URL}/status")
 
 # --- UI Setup ---
 
 def setup_ui():
     """Creates all the UI elements for the application."""
-    with dpg.window(label="Main", tag="primary_window"):
-        # --- Top Control Panel ---
-        with dpg.group():
-            with dpg.group(horizontal=True):
-                dpg.add_button(
-                    label="Select Dataset Root...",
-                    callback=callback_select_dataset_root,
-                    tag="select_root_button"
-                )
-                dpg.add_text("Current Root: Not Set", tag="dataset_root_text")
+    with dpg.window(tag="primary_window"):
+        with dpg.tab_bar():
+            with dpg.tab(label="Search / Browse"):
+                # --- Top Control Panel ---
+                with dpg.group():
+                    with dpg.group(horizontal=True):
+                        dpg.add_button(label="Select Dataset Root...", callback=callback_select_dataset_root, tag="select_root_button")
+                        dpg.add_text("Current Root: Not Set", tag="dataset_root_text")
 
-            with dpg.group(horizontal=True):
-                dpg.add_text("Index Target:")
-                dpg.add_combo(
-                    items=g["subdirectories"],
-                    tag="subdir_selector",
-                    callback=callback_subdir_selected,
-                    width=250,
-                    enabled=False # Enabled after root is set
-                )
-                dpg.add_button(
-                    label="Build Index",
-                    tag="build_index_button",
-                    callback=callback_build_index,
-                    enabled=False # Enabled after root is set
-                )
+                    with dpg.group(horizontal=True):
+                        dpg.add_text("Index Target:")
+                        dpg.add_combo(items=g["subdirectories"], tag="subdir_selector", callback=callback_subdir_selected, width=250, enabled=False)
+                        dpg.add_button(label="Build Index", tag="build_index_button", callback=callback_build_index, enabled=False)
+                
+                dpg.add_separator()
 
-        dpg.add_separator()
+                # --- Search Panel ---
+                with dpg.group(tag="search_group", enabled=False):
+                    with dpg.group(horizontal=True):
+                        dpg.add_input_text(tag="search_input", hint="Enter search query...", width=-150, on_enter=True, callback=callback_search)
+                        dpg.add_input_int(tag="top_k_input", label="Top K", width=100, default_value=10, min_value=1, max_value=100)
+                        dpg.add_button(label="Search", callback=callback_search)
+                
+                dpg.add_separator()
 
-        # Placeholder for search and results
-        dpg.add_text("Search and results will go here.")
+                # --- Results Gallery ---
+                with dpg.child_window(tag="results_gallery"):
+                    dpg.add_text("Build an index or perform a search to see images here.")
 
-        dpg.add_separator()
+            # This is a placeholder for the training UI, as requested.
+            with dpg.tab(label="Training"):
+                dpg.add_text("Training and data augmentation UI will be implemented here.")
+                dpg.add_text("This section will allow fine-tuning the CLIP model on your own datasets.")
 
         # --- Status Bar ---
         dpg.add_text(g["status_text"], tag="status_text")
 
-
 def launch_gui(api_url: str):
-    """
-    Sets up and runs the Dear PyGui interface.
-    """
     global API_URL
     API_URL = api_url
 
     dpg.create_context()
+    
+    # Create a texture registry
+    with dpg.texture_registry(tag="texture_registry"):
+        # Create a placeholder "loading" texture (a simple grey square)
+        loading_pixel = np.array([0.5, 0.5, 0.5, 1.0]) # RGBA
+        loading_data = np.tile(loading_pixel, (THUMBNAIL_SIZE[0] * THUMBNAIL_SIZE[1], 1)).flatten()
+        g["loading_texture_id"] = dpg.add_static_texture(width=THUMBNAIL_SIZE[0], height=THUMBNAIL_SIZE[1], default_value=loading_data)
 
     setup_ui()
 
-    # --- Viewport Setup ---
-    dpg.create_viewport(
-        title="CLIP Semantic Search",
-        width=WINDOW_WIDTH,
-        height=WINDOW_HEIGHT
-    )
+    dpg.create_viewport(title="CLIP Semantic Search", width=WINDOW_WIDTH, height=WINDOW_HEIGHT)
     dpg.setup_dearpygui()
     dpg.show_viewport()
     dpg.set_primary_window("primary_window", True)
 
-    # --- Main Render Loop ---
-    while dpg.is_dearpygui_running():
-        dpg.render_dearpygui_frame()
+    initialize_app_state()
 
+    dpg.start_dearpygui()
     dpg.destroy_context()
 
 if __name__ == "__main__":
-    # This allows running the GUI directly for development,
-    # but it won't have a running server unless you start it manually.
     print("Running GUI in standalone mode. Make sure the FastAPI server is running.")
     launch_gui(api_url="http://127.0.0.1:8000")

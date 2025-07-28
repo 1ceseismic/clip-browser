@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import json
 from PIL import Image
+from typing import Optional
 
 # --- Configuration ---
 INDEX_FILE = "image.index"
@@ -46,6 +47,12 @@ class SearchResponse(BaseModel):
     query: str
     results: list[dict]
 
+class AppStatus(BaseModel):
+    dataset_root: Optional[str]
+    indexed_dir: Optional[str]
+    index_loaded: bool
+    indexed_image_count: int
+
 # --- API Endpoints ---
 
 @app.on_event("startup")
@@ -53,6 +60,15 @@ def startup():
     """Load the index and metadata from disk if they exist."""
     try:
         with _idx_lock:
+            # Load app metadata first to find the dataset root
+            if os.path.exists(APP_METADATA_FILE):
+                with open(APP_METADATA_FILE) as f:
+                    app_metadata = json.load(f)
+                    g["indexed_dir"] = app_metadata.get("indexed_dir")
+                    # Important: Set dataset_root from metadata if available
+                    if app_metadata.get("dataset_root"):
+                        g["dataset_root"] = Path(app_metadata.get("dataset_root"))
+            
             g["indexer"].load_index(INDEX_FILE, METADATA_FILE)
 
             # Consistency check to prevent IndexError
@@ -61,12 +77,10 @@ def startup():
                     print(f"Index-metadata mismatch! Index has {g['indexer'].index.ntotal} vectors, metadata has {len(g['indexer'].paths)} paths. Discarding loaded index.")
                     raise ValueError("Inconsistent index and metadata files.")
 
-            with open(APP_METADATA_FILE) as f:
-                app_metadata = json.load(f)
-                g["indexed_dir"] = app_metadata.get("indexed_dir")
             if not g["indexed_dir"]:
                 raise KeyError("indexed_dir not found in app metadata")
             print(f"Loaded index for '{g['indexed_dir']}' with {g['indexer'].index.ntotal} embeddings.")
+
     except (FileNotFoundError, KeyError, json.JSONDecodeError, ValueError, AttributeError, RuntimeError) as e:
         print(f"Index files missing or invalid — rebuild using /build-index. Error: {e}")
         g["indexer"].index = None
@@ -111,8 +125,12 @@ def build_index(img_dir: str, checkpoint: str = "openai"):
         # We need to load the index and metadata we just created to sync the state.
         g["indexer"].load_index(INDEX_FILE, METADATA_FILE)
 
+        # Save the dataset root along with the indexed directory
         with open(APP_METADATA_FILE, "w") as f:
-            json.dump({"indexed_dir": img_dir}, f)
+            json.dump({
+                "indexed_dir": img_dir,
+                "dataset_root": str(g["dataset_root"])
+            }, f)
 
         g["indexed_dir"] = img_dir
         print(f"Successfully built index for '{img_dir}'.")
@@ -162,6 +180,21 @@ def get_all_images():
     base_path = g["indexed_dir"]
     full_paths = [f"{base_path}/{p}" for p in g["indexer"].paths]
     return {"images": full_paths}
+
+@app.get("/status", response_model=AppStatus)
+def get_status():
+    """Returns the current status of the application."""
+    with _idx_lock:
+        count = 0
+        if g["indexer"].index is not None:
+            count = g["indexer"].index.ntotal
+        
+        return AppStatus(
+            dataset_root=str(g["dataset_root"]) if g.get("dataset_root") else None,
+            indexed_dir=g.get("indexed_dir"),
+            index_loaded=g["indexer"].index is not None,
+            indexed_image_count=count
+        )
 
 @app.get("/health")
 def health():
