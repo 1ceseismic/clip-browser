@@ -81,13 +81,14 @@ def callback_dataset_root_selected(sender, app_data):
             threaded_api_call(
                 target=requests.get,
                 on_success=on_get_directories_success,
-                kwargs={'url': f"{API_URL}/directories"}
+                url=f"{API_URL}/directories"
             )
 
         threaded_api_call(
             target=requests.post,
             on_success=on_success,
-            kwargs={'url': f"{API_URL}/set-dataset-root", 'json': {"path": path}}
+            url=f"{API_URL}/set-dataset-root",
+            json={"path": path}
         )
 
 def on_get_directories_success(data):
@@ -136,11 +137,9 @@ def callback_build_index(sender, app_data):
         target=requests.post,
         on_success=on_success,
         on_error=on_error,
-        kwargs={
-            'url': f"{API_URL}/build-index",
-            'params': {"img_dir": g["selected_subdir"]},
-            'timeout': 600 # 10 minute timeout for indexing
-        }
+        url=f"{API_URL}/build-index",
+        params={"img_dir": g["selected_subdir"]},
+        timeout=600 # 10 minute timeout for indexing
     )
 
 def callback_subdir_selected(sender, app_data):
@@ -152,39 +151,40 @@ def callback_subdir_selected(sender, app_data):
 def setup_ui():
     """Creates all the UI elements for the application."""
     with dpg.window(label="Main", tag="primary_window"):
-        with dpg.group(horizontal=True):
-            dpg.add_button(
-                label="Select Dataset Root...",
-                callback=callback_select_dataset_root,
-                tag="select_root_button"
-            )
-            dpg.add_text("Current Root: Not Set", tag="dataset_root_text")
+        # --- Top Control Panel ---
+        with dpg.group():
+            with dpg.group(horizontal=True):
+                dpg.add_button(
+                    label="Select Dataset Root...",
+                    callback=callback_select_dataset_root,
+                    tag="select_root_button"
+                )
+                dpg.add_text("Current Root: Not Set", tag="dataset_root_text")
 
-        dpg.add_separator()
-
-        with dpg.group(horizontal=True):
-            dpg.add_text("Index Target:")
-            dpg.add_combo(
-                items=g["subdirectories"],
-                tag="subdir_selector",
-                callback=callback_subdir_selected,
-                width=250,
-                enabled=False # Enabled after root is set
-            )
-            dpg.add_button(
-                label="Build Index",
-                tag="build_index_button",
-                callback=callback_build_index,
-                enabled=False # Enabled after root is set
-            )
+            with dpg.group(horizontal=True):
+                dpg.add_text("Index Target:")
+                dpg.add_combo(
+                    items=g["subdirectories"],
+                    tag="subdir_selector",
+                    callback=callback_subdir_selected,
+                    width=250,
+                    enabled=False # Enabled after root is set
+                )
+                dpg.add_button(
+                    label="Build Index",
+                    tag="build_index_button",
+                    callback=callback_build_index,
+                    enabled=False # Enabled after root is set
+                )
 
         dpg.add_separator()
 
         # Placeholder for search and results
         dpg.add_text("Search and results will go here.")
 
-    # --- Status Bar ---
-    with dpg.viewport_menu_bar():
+        dpg.add_separator()
+
+        # --- Status Bar ---
         dpg.add_text(g["status_text"], tag="status_text")
 
 
