@@ -213,17 +213,39 @@ def _handle_status_update(data):
         else:
              update_status("Welcome! Please select a dataset root to begin.")
 
+def _clear_main_views():
+    """(Main Thread) Clears all data views in the UI to prepare for new data."""
+    g["loaded_textures"].clear()
+    if dpg.does_item_exist("search_gallery"):
+        dpg.delete_item("search_gallery", children_only=True)
+        dpg.add_text("Loading...", parent="search_gallery")
+    if dpg.does_item_exist("cluster_gallery"):
+        dpg.delete_item("cluster_gallery", children_only=True)
+    if dpg.does_item_exist("cluster_sidebar"):
+        dpg.delete_item("cluster_sidebar", children_only=True)
+    if g["umap_series_tags"]:
+        for tag in g["umap_series_tags"]:
+            if dpg.does_item_exist(tag):
+                dpg.delete_item(tag)
+        g["umap_series_tags"].clear()
+
 def set_dataset_root(path: str):
-    """Sets the dataset root and triggers a status update."""
+    """Sets the dataset root, clears the UI, and triggers a backend status update."""
     if not path:
         update_status("Error: Tried to set an empty or invalid dataset path.")
         return
 
     update_status(f"Setting dataset root to: {path}...")
+    
+    # Clear existing UI state before loading new data
+    g["ui_update_queue"].put((lambda s,a,u: _clear_main_views(), None))
+
     config.add_recent_path(path)
     rebuild_recent_files_menu()
 
     def on_set_root_success(data):
+        # This will fetch the new status and trigger _handle_status_update,
+        # which will repopulate the UI with the new data.
         threaded_api_call(target=requests.get, on_success=_handle_status_update, url=f"{API_URL}/status")
 
     threaded_api_call(target=requests.post, on_success=on_set_root_success, url=f"{API_URL}/set-dataset-root", json={"path": path})

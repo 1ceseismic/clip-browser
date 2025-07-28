@@ -72,56 +72,77 @@ class AllMetadataResponse(BaseModel):
     metadata: List[Dict[str, Any]]
 
 
+# --- Internal Logic ---
+
+def _load_index_for_root(root_path: Path):
+    """
+    Attempts to load the index files corresponding to a given root path.
+    Clears the current index if no valid index is found.
+    This is the central function for managing the loaded index state.
+    """
+    global g
+    with _idx_lock:
+        # Reset current index state before attempting to load a new one
+        g["indexer"].index = None
+        g["indexer"].metadata = []
+        g["indexed_dir"] = None
+        g["dataset_root"] = root_path # Set the root, even if index loading fails
+
+        # The app metadata file is always in the project root, not the dataset root
+        if not os.path.exists(APP_METADATA_FILE):
+            print(f"App metadata file not found. Cannot load index for {root_path}")
+            return
+
+        try:
+            with open(APP_METADATA_FILE) as f:
+                app_metadata = json.load(f)
+
+            # Check if the index we have corresponds to the root we want to load
+            if app_metadata.get("dataset_root") != str(root_path):
+                print(f"Index mismatch: App metadata is for '{app_metadata.get('dataset_root')}', but trying to load '{root_path}'. Not loading index.")
+                return
+
+            # Check if the main index files exist
+            if not all(os.path.exists(f) for f in [INDEX_FILE, METADATA_FILE]):
+                print(f"Index files '{INDEX_FILE}' or '{METADATA_FILE}' not found. Cannot load index for {root_path}")
+                return
+            
+            print(f"Found valid index for root: {root_path}. Loading...")
+            g["indexed_dir"] = app_metadata.get("indexed_dir")
+            g["indexer"].load_index(INDEX_FILE, METADATA_FILE)
+            print(f"Loaded index for '{g['indexed_dir']}' with {g['indexer'].index.ntotal} embeddings.")
+
+        except (FileNotFoundError, KeyError, json.JSONDecodeError, ValueError, AttributeError, RuntimeError) as e:
+            print(f"Error during index load for {root_path}: {e}. Clearing index state.")
+            g["indexer"].index = None
+            g["indexer"].metadata = []
+            g["indexed_dir"] = None
+
+
 # --- API Endpoints ---
 
 @app.on_event("startup")
 def startup():
     """Load the last used index and metadata from disk if they exist."""
-    try:
-        with _idx_lock:
-            last_root = config.get_last_used_path()
-            if not last_root:
-                print("No last used dataset root found in config.")
-                return
-
-            # Check if the index files exist in the project root.
-            if not all(os.path.exists(f) for f in [APP_METADATA_FILE, INDEX_FILE, METADATA_FILE]):
-                 print("Index files not found in project directory. Please build an index.")
-                 return
-
-            with open(APP_METADATA_FILE) as f:
-                app_metadata = json.load(f)
-            
-            # Verify the saved index belongs to the last used dataset root
-            if app_metadata.get("dataset_root") != last_root:
-                print(f"Index mismatch: Found index for '{app_metadata.get('dataset_root')}' but last session used '{last_root}'. Not loading.")
-                return
-
-            print(f"Found valid index for last used root: {last_root}")
-            g["dataset_root"] = Path(last_root)
-            g["indexed_dir"] = app_metadata.get("indexed_dir")
-            g["indexer"].load_index(INDEX_FILE, METADATA_FILE)
-
-            print(f"Loaded index for '{g['indexed_dir']}' with {g['indexer'].index.ntotal} embeddings.")
-
-    except (FileNotFoundError, KeyError, json.JSONDecodeError, ValueError, AttributeError, RuntimeError) as e:
-        print(f"Startup Error: Index files missing or invalid. Rebuild using the UI. Error: {e}")
-        g["indexer"].index = None
-        g["indexer"].metadata = []
-        g["indexed_dir"] = None
-        g["dataset_root"] = None
+    last_root = config.get_last_used_path()
+    if last_root:
+        _load_index_for_root(Path(last_root))
+    else:
+        print("No last used dataset root found in config.")
 
 
 @app.post("/set-dataset-root")
 def set_dataset_root(payload: PathRequest):
-    """Sets the root directory for datasets and saves it to config."""
+    """Sets the root directory for datasets, saves it, and attempts to load its index."""
     new_root = Path(payload.path)
     if not new_root.is_dir():
         raise HTTPException(status_code=404, detail="Path is not a valid directory")
-    g["dataset_root"] = new_root
     
     # Save this path as the most recent one
     config.add_recent_path(str(new_root))
+    
+    # Attempt to load the index for this new root, which will update the global state
+    _load_index_for_root(new_root)
     
     return {"status": "ok", "path": str(new_root)}
 
@@ -174,7 +195,8 @@ def search(q: str, top_k: int = 5):
     results = g["indexer"].search(q, top_k=top_k)
     base_path = g["indexed_dir"]
     # The paths from the indexer are now relative, so we prepend the indexed directory name
-    full_results = [{"path": f"{base_path}/{p}", "score": s} for p, s in results]
+    # Use os.path.join and then normalize to forward slashes for API consistency
+    full_results = [{"path": os.path.join(base_path, p).replace('\\', '/'), "score": s} for p, s in results]
     
     return SearchResponse(query=q, results=full_results)
 
@@ -206,7 +228,7 @@ def get_all_images():
         return {"images": []}
     
     base_path = g["indexed_dir"]
-    full_paths = [f"{base_path}/{item['path']}" for item in g["indexer"].metadata]
+    full_paths = [os.path.join(base_path, item['path']).replace('\\', '/') for item in g["indexer"].metadata]
     return {"images": full_paths}
 
 @app.get("/all-metadata", response_model=AllMetadataResponse)
@@ -253,7 +275,7 @@ def get_clusters():
         response_clusters.append(ClusterInfo(
             cluster_id=cluster_id,
             count=len(paths),
-            preview_paths=[f"{base_path}/{p}" for p in paths[:4]] # Get up to 4 previews
+            preview_paths=[os.path.join(base_path, p).replace('\\', '/') for p in paths[:4]] # Get up to 4 previews
         ))
     
     return ClustersResponse(clusters=response_clusters)
@@ -266,7 +288,7 @@ def get_cluster_images(cluster_id: int):
 
     base_path = g["indexed_dir"]
     image_paths = [
-        f"{base_path}/{item['path']}"
+        os.path.join(base_path, item['path']).replace('\\', '/')
         for item in g["indexer"].metadata
         if item['cluster_id'] == cluster_id
     ]
