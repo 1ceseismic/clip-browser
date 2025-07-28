@@ -132,17 +132,17 @@ def display_gallery_images(sender, app_data, user_data):
         return
 
     gallery_width = dpg.get_item_width(gallery_tag)
+    if gallery_width <= 0: gallery_width = WINDOW_WIDTH - 300 # Fallback
     items_per_row = max(1, math.floor(gallery_width / GALLERY_ITEM_WIDTH))
     
     for i, rel_path in enumerate(image_paths):
-        if i > 0 and i % items_per_row == 0:
-            dpg.add_separator(parent=gallery_tag)
-        elif i > 0:
+        # Add same_line for all items except the first in each row
+        if i % items_per_row != 0:
             dpg.add_same_line(parent=gallery_tag)
 
         full_path = os.path.join(g["dataset_root"], rel_path)
         
-        with dpg.group(parent=gallery_tag, width=GALLERY_ITEM_WIDTH) as item_group:
+        with dpg.group(parent=gallery_tag) as item_group:
             img_widget_tag = dpg.add_image(g["loading_texture_id"], width=THUMBNAIL_SIZE, height=THUMBNAIL_SIZE)
             dpg.add_text(os.path.basename(rel_path), wrap=GALLERY_ITEM_WIDTH - 10)
             if search_scores:
@@ -161,6 +161,10 @@ def display_gallery_images(sender, app_data, user_data):
 
 def set_dataset_root(path: str):
     """Sets the dataset root and triggers fetching subdirectories."""
+    if not path:
+        update_status("Error: Tried to set an empty or invalid dataset path.")
+        return
+
     update_status(f"Setting dataset root to: {path}...")
     config.add_recent_path(path) # Save to recents
     rebuild_recent_files_menu()
@@ -200,7 +204,7 @@ def callback_build_index(sender, app_data):
     if not g["selected_subdir"] or g["is_indexing"]: return
     g["is_indexing"] = True
     dpg.disable_item("build_index_button")
-    dpg.disable_item("select_root_button")
+    dpg.disable_item("select_root_menu_item")
     update_status(f"Building index for '{g['selected_subdir']}'. This may take a while...")
 
     def on_success(data):
@@ -209,7 +213,7 @@ def callback_build_index(sender, app_data):
         g["is_indexing"] = False
         g["index_loaded"] = True
         dpg.enable_item("build_index_button")
-        dpg.enable_item("select_root_button")
+        dpg.enable_item("select_root_menu_item")
         dpg.enable_item("search_group")
         load_all_images_from_api()
         # After building index, also fetch clusters
@@ -219,7 +223,7 @@ def callback_build_index(sender, app_data):
         update_status(f"Error building index: {error_message}")
         g["is_indexing"] = False
         dpg.enable_item("build_index_button")
-        dpg.enable_item("select_root_button")
+        dpg.enable_item("select_root_menu_item")
 
     threaded_api_call(target=requests.post, on_success=on_success, on_error=on_error, url=f"{API_URL}/build-index", params={"img_dir": g["selected_subdir"]}, timeout=600)
 
@@ -323,19 +327,22 @@ def initialize_app_state():
 def rebuild_recent_files_menu():
     dpg.delete_item("recent_files_menu", children_only=True)
     recent_paths = config.get_recent_paths()
+    if not recent_paths:
+        dpg.add_text("No recent paths", parent="recent_files_menu")
+        return
     for path in recent_paths:
         dpg.add_menu_item(label=path, parent="recent_files_menu", callback=lambda s, a, p=path: set_dataset_root(p))
 
 # --- UI Setup ---
 
 def setup_ui():
-    with dpg.viewport_menu_bar():
-        with dpg.menu(label="File"):
-            dpg.add_menu_item(label="Select Dataset Root...", callback=callback_select_dataset_root)
-            with dpg.menu(label="Recent", tag="recent_files_menu"):
-                dpg.add_text("No recent paths")
-
     with dpg.window(tag="primary_window"):
+        with dpg.menu_bar():
+            with dpg.menu(label="File"):
+                dpg.add_menu_item(label="Select Dataset Root...", callback=callback_select_dataset_root, tag="select_root_menu_item")
+                with dpg.menu(label="Recent", tag="recent_files_menu"):
+                    dpg.add_text("No recent paths")
+
         with dpg.tab_bar():
             with dpg.tab(label="Search / Browse"):
                 with dpg.group():
