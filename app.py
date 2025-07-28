@@ -211,7 +211,8 @@ def get_thumbnail(image_path: str):
         raise HTTPException(status_code=404, detail="Image not found")
 
     relative_path = full_image_path.relative_to(g["dataset_root"])
-    thumbnail_path = THUMBNAIL_CACHE_DIR / relative_path
+    # Create a consistent cache path, always using .jpg for thumbnails
+    thumbnail_path = (THUMBNAIL_CACHE_DIR / relative_path).with_suffix('.jpg')
     
     if thumbnail_path.exists():
         return FileResponse(str(thumbnail_path))
@@ -219,9 +220,10 @@ def get_thumbnail(image_path: str):
     try:
         thumbnail_path.parent.mkdir(parents=True, exist_ok=True)
         with Image.open(full_image_path) as img:
-            if img.mode not in ("RGB", "RGBA"):
-                img = img.convert("RGB")
             img.thumbnail(THUMBNAIL_MAX_SIZE)
+            # Convert to RGB before saving as JPEG to handle RGBA, P, etc.
+            if img.mode != "RGB":
+                img = img.convert("RGB")
             img.save(thumbnail_path, "JPEG", quality=85)
         return FileResponse(str(thumbnail_path))
     except Exception as e:

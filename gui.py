@@ -66,20 +66,24 @@ def threaded_api_call(target, on_success=None, on_error=None, **kwargs):
 
 # --- Image & Texture Loading ---
 
-def threaded_load_texture_from_disk(full_image_path: str, widget_tag: int, texture_registry_tag: int):
+def threaded_load_texture_from_api(rel_image_path: str, widget_tag: int, texture_registry_tag: int):
     """
-    Loads a single thumbnail directly from disk in a background thread
+    Loads a single thumbnail from the API in a background thread
     and applies it to an image widget.
     """
-    # Use full_image_path as the key for caching
-    if full_image_path in g["loaded_textures"]:
+    # Use rel_image_path as the key for caching textures in memory
+    if rel_image_path in g["loaded_textures"]:
         if dpg.does_item_exist(widget_tag):
-            dpg.set_value(widget_tag, g["loaded_textures"][full_image_path])
+            dpg.set_value(widget_tag, g["loaded_textures"][rel_image_path])
         return
 
     try:
-        with Image.open(full_image_path) as img:
-            img.thumbnail((THUMBNAIL_SIZE, THUMBNAIL_SIZE))
+        url = f"{API_URL}/thumbnail/{rel_image_path}"
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+
+        with Image.open(io.BytesIO(response.content)) as img:
+            # The API now returns a JPEG, which is RGB. Convert to RGBA for DPG.
             img = img.convert("RGBA")
             texture_data = np.frombuffer(img.tobytes(), dtype=np.uint8) / 255.0
 
@@ -92,15 +96,15 @@ def threaded_load_texture_from_disk(full_image_path: str, widget_tag: int, textu
         
         if dpg.does_item_exist(widget_tag):
             dpg.set_value(widget_tag, texture_id)
-        g["loaded_textures"][full_image_path] = texture_id
+        g["loaded_textures"][rel_image_path] = texture_id
 
     except Exception as e:
-        print(f"Error loading thumbnail from disk for {full_image_path}: {e}")
+        print(f"Error loading thumbnail for {rel_image_path}: {e}")
 
 def display_gallery_images(sender, app_data, user_data):
     """
     Callback for the main thread. Clears and populates the gallery with image widgets
-    in a grid layout, then loads textures asynchronously from disk.
+    in a grid layout, then loads textures asynchronously from the API.
     """
     image_paths = user_data.get("image_paths", [])
     search_scores = user_data.get("search_scores")
@@ -111,18 +115,13 @@ def display_gallery_images(sender, app_data, user_data):
         dpg.add_text("No images found.", parent="results_gallery")
         return
     
-    if not g["dataset_root"]:
-        dpg.add_text("Error: Dataset Root is not set.", parent="results_gallery")
-        return
-
     # Calculate how many items can fit in a row
     gallery_width = dpg.get_item_width("results_gallery")
     items_per_row = max(1, math.floor(gallery_width / GALLERY_ITEM_WIDTH))
     
     count = 0
     for i, rel_path in enumerate(image_paths):
-        full_path = os.path.join(g["dataset_root"], rel_path)
-        
+        # We no longer need the full path in the GUI
         with dpg.group(parent="results_gallery", width=GALLERY_ITEM_WIDTH):
             img_widget_tag = dpg.add_image(g["loading_texture_id"], width=THUMBNAIL_SIZE, height=THUMBNAIL_SIZE)
             dpg.add_text(os.path.basename(rel_path), wrap=GALLERY_ITEM_WIDTH - 10)
@@ -130,8 +129,8 @@ def display_gallery_images(sender, app_data, user_data):
                 dpg.add_text(f"Score: {search_scores[i]:.4f}")
             
             threading.Thread(
-                target=threaded_load_texture_from_disk, 
-                args=(full_path, img_widget_tag, "texture_registry"),
+                target=threaded_load_texture_from_api, 
+                args=(rel_path, img_widget_tag, "texture_registry"),
                 daemon=True
             ).start()
 
