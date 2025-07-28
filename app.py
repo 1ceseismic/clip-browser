@@ -11,11 +11,10 @@ from PIL import Image
 from typing import Optional, List, Dict, Any
 from collections import defaultdict
 import config
+import hashlib
+from datetime import datetime, timezone
 
 # --- Configuration ---
-INDEX_FILE = "image.index"
-METADATA_FILE = "metadata.json"  # Used by inference.py, contains a list of dicts with relative paths
-APP_METADATA_FILE = "app_metadata.json" # Used by this app, contains a dict
 IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png'}
 THUMBNAIL_CACHE_DIR = Path(".thumbnails")
 THUMBNAIL_MAX_SIZE = (256, 256)
@@ -74,49 +73,82 @@ class AllMetadataResponse(BaseModel):
 
 # --- Internal Logic ---
 
-def _load_index_for_root(root_path: Path):
-    """
-    Attempts to load the index files corresponding to a given root path.
-    Clears the current index if no valid index is found.
-    This is the central function for managing the loaded index state.
-    """
-    global g
-    with _idx_lock:
-        # Reset current index state before attempting to load a new one
-        g["indexer"].index = None
-        g["indexer"].metadata = []
-        g["indexed_dir"] = None
-        g["dataset_root"] = root_path # Set the root, even if index loading fails
+def _clear_index_state():
+    """Resets the global indexer state."""
+    g["indexer"].index = None
+    g["indexer"].metadata = []
+    g["indexed_dir"] = None
 
-        # The app metadata file is always in the project root, not the dataset root
-        if not os.path.exists(APP_METADATA_FILE):
-            print(f"App metadata file not found. Cannot load index for {root_path}")
+def _load_index(root_path: Path, indexed_subdir: str):
+    """
+    Loads a specific index into memory based on the root path and subdirectory.
+    """
+    with _idx_lock:
+        _clear_index_state()
+        g["dataset_root"] = root_path
+
+        registry = config.load_index_registry()
+        root_key = str(root_path)
+        
+        index_info = registry.get(root_key, {}).get(indexed_subdir)
+        if not index_info:
+            print(f"No index found in registry for {root_path} -> {indexed_subdir}")
             return
 
+        index_dir_hash = index_info.get("index_dir_hash")
+        if not index_dir_hash:
+            print(f"Index info for {root_path} -> {indexed_subdir} is missing hash.")
+            return
+
+        index_storage_path = config.INDEXES_DIR / index_dir_hash
+        index_file = index_storage_path / "image.index"
+        meta_file = index_storage_path / "metadata.json"
+
+        if not index_file.exists() or not meta_file.exists():
+            print(f"Index files not found in {index_storage_path}. The registry may be out of sync.")
+            return
+        
         try:
-            with open(APP_METADATA_FILE) as f:
-                app_metadata = json.load(f)
-
-            # Check if the index we have corresponds to the root we want to load
-            if app_metadata.get("dataset_root") != str(root_path):
-                print(f"Index mismatch: App metadata is for '{app_metadata.get('dataset_root')}', but trying to load '{root_path}'. Not loading index.")
-                return
-
-            # Check if the main index files exist
-            if not all(os.path.exists(f) for f in [INDEX_FILE, METADATA_FILE]):
-                print(f"Index files '{INDEX_FILE}' or '{METADATA_FILE}' not found. Cannot load index for {root_path}")
-                return
-            
-            print(f"Found valid index for root: {root_path}. Loading...")
-            g["indexed_dir"] = app_metadata.get("indexed_dir")
-            g["indexer"].load_index(INDEX_FILE, METADATA_FILE)
+            print(f"Loading index from {index_storage_path}...")
+            g["indexer"].load_index(str(index_file), str(meta_file))
+            g["indexed_dir"] = indexed_subdir
             print(f"Loaded index for '{g['indexed_dir']}' with {g['indexer'].index.ntotal} embeddings.")
+        except Exception as e:
+            print(f"Error loading index from {index_storage_path}: {e}")
+            _clear_index_state()
 
-        except (FileNotFoundError, KeyError, json.JSONDecodeError, ValueError, AttributeError, RuntimeError) as e:
-            print(f"Error during index load for {root_path}: {e}. Clearing index state.")
-            g["indexer"].index = None
-            g["indexer"].metadata = []
-            g["indexed_dir"] = None
+
+def _find_and_load_latest_index_for_root(root_path: Path):
+    """Finds the most recently updated index for a given root and loads it."""
+    with _idx_lock:
+        _clear_index_state()
+        g["dataset_root"] = root_path
+
+        registry = config.load_index_registry()
+        root_key = str(root_path)
+        
+        indexes_for_root = registry.get(root_key, {})
+        if not indexes_for_root:
+            print(f"No indexes found for root: {root_path}")
+            return
+
+        # Find the subdirectory with the most recent 'last_updated' timestamp
+        latest_subdir = None
+        latest_time = None
+        for subdir, info in indexes_for_root.items():
+            try:
+                updated_time = datetime.fromisoformat(info['last_updated'])
+                if latest_time is None or updated_time > latest_time:
+                    latest_time = updated_time
+                    latest_subdir = subdir
+            except (KeyError, ValueError):
+                continue # Skip entries with missing or invalid timestamp
+
+        if latest_subdir:
+            print(f"Found latest index for '{root_path}' in subdir '{latest_subdir}'.")
+            _load_index(root_path, latest_subdir)
+        else:
+            print(f"Could not determine latest index for root: {root_path}")
 
 
 # --- API Endpoints ---
@@ -126,23 +158,20 @@ def startup():
     """Load the last used index and metadata from disk if they exist."""
     last_root = config.get_last_used_path()
     if last_root:
-        _load_index_for_root(Path(last_root))
+        _find_and_load_latest_index_for_root(Path(last_root))
     else:
         print("No last used dataset root found in config.")
 
 
 @app.post("/set-dataset-root")
 def set_dataset_root(payload: PathRequest):
-    """Sets the root directory for datasets, saves it, and attempts to load its index."""
+    """Sets the root directory for datasets, saves it, and attempts to load its latest index."""
     new_root = Path(payload.path)
     if not new_root.is_dir():
         raise HTTPException(status_code=404, detail="Path is not a valid directory")
     
-    # Save this path as the most recent one
     config.add_recent_path(str(new_root))
-    
-    # Attempt to load the index for this new root, which will update the global state
-    _load_index_for_root(new_root)
+    _find_and_load_latest_index_for_root(new_root)
     
     return {"status": "ok", "path": str(new_root)}
 
@@ -152,37 +181,38 @@ def build_index(img_dir: str, checkpoint: str = "openai"):
     if not g.get("dataset_root"):
         raise HTTPException(status_code=400, detail="Dataset root path not set")
     with _idx_lock:
-        # Resolve the path to get a clean, absolute path for the indexer
         full_img_path = (g["dataset_root"] / img_dir).resolve()
         if not full_img_path.is_dir():
             raise HTTPException(status_code=404, detail=f"Directory not found: {full_img_path}")
 
-        # --- Force a clean rebuild by deleting old files ---
-        for f in [INDEX_FILE, METADATA_FILE, APP_METADATA_FILE]:
-            if os.path.exists(f):
-                try:
-                    os.remove(f)
-                except OSError as e:
-                    print(f"Error removing file {f}: {e}")
-                    raise HTTPException(status_code=500, detail=f"Could not remove old index file: {f}")
+        # Generate a unique, stable ID for the directory being indexed
+        dir_hash = hashlib.md5(str(full_img_path).encode()).hexdigest()
+        index_storage_path = config.INDEXES_DIR / dir_hash
+        index_storage_path.mkdir(parents=True, exist_ok=True)
 
-        g["indexer"] = CLIPIndexer("ViT-B-32", pretrained=checkpoint)
-        # build_index now correctly handles relative paths internally
-        g["indexer"].build_index(str(full_img_path), INDEX_FILE, METADATA_FILE)
+        index_file = index_storage_path / "image.index"
+        meta_file = index_storage_path / "metadata.json"
+
+        # Build the index
+        temp_indexer = CLIPIndexer("ViT-B-32", pretrained=checkpoint)
+        temp_indexer.build_index(str(full_img_path), str(index_file), str(meta_file))
         
-        # After building, the indexer object in memory is still empty.
-        # We need to load the index and metadata we just created to sync the state.
-        g["indexer"].load_index(INDEX_FILE, METADATA_FILE)
-
-        # Save the dataset root along with the indexed directory
-        with open(APP_METADATA_FILE, "w") as f:
-            json.dump({
-                "indexed_dir": img_dir,
-                "dataset_root": str(g["dataset_root"])
-            }, f)
-
+        # Load the newly built index into the global state
+        g["indexer"].load_index(str(index_file), str(meta_file))
         g["indexed_dir"] = img_dir
-        print(f"Successfully built index for '{img_dir}'.")
+        
+        # Update the central registry
+        registry = config.load_index_registry()
+        root_key = str(g["dataset_root"])
+        registry.setdefault(root_key, {})
+        registry[root_key][img_dir] = {
+            "index_dir_hash": dir_hash,
+            "image_count": g["indexer"].index.ntotal,
+            "last_updated": datetime.now(timezone.utc).isoformat()
+        }
+        config.save_index_registry(registry)
+
+        print(f"Successfully built and registered index for '{full_img_path}'.")
         return {"status": "index built", "total": g["indexer"].index.ntotal}
 
 @app.get("/search", response_model=SearchResponse)
@@ -194,8 +224,8 @@ def search(q: str, top_k: int = 5):
     
     results = g["indexer"].search(q, top_k=top_k)
     base_path = g["indexed_dir"]
-    # The paths from the indexer are now relative, so we prepend the indexed directory name
-    # Use os.path.join and then normalize to forward slashes for API consistency
+    # The paths from the indexer are relative to the indexed sub-directory.
+    # We need to prepend the indexed directory name to make them relative to the root.
     full_results = [{"path": os.path.join(base_path, p).replace('\\', '/'), "score": s} for p, s in results]
     
     return SearchResponse(query=q, results=full_results)
@@ -311,6 +341,7 @@ def get_thumbnail(image_path: str):
 
     try:
         full_image_path = (g["dataset_root"] / image_path).resolve()
+        # Security check: ensure the resolved path is within the dataset root
         if g["dataset_root"].resolve() not in full_image_path.parents and full_image_path != g["dataset_root"].resolve():
              raise HTTPException(status_code=403, detail="Forbidden: Access outside of dataset root is not allowed.")
     except Exception:
