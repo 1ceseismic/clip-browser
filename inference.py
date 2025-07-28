@@ -37,7 +37,12 @@ class CLIPIndexer:
         self.model.eval().to(self.device)
         self.tokenizer = open_clip.get_tokenizer(model_name)
         self.index = None
-        self.paths = []
+        self.metadata = []
+
+    @property
+    def paths(self):
+        """Returns a list of paths from the metadata."""
+        return [item['path'] for item in self.metadata]
 
     def build_index(self,img_dir: str, index_path: str, meta_path: str, batch_size: int = 32, num_workers: int = 4):
         """
@@ -77,6 +82,8 @@ class CLIPIndexer:
         self.index.add_with_ids(embeddings, ids)
 
         faiss.write_index(self.index, index_path)
+        # Sort metadata by ID before saving to ensure consistency
+        all_meta.sort(key=lambda x: x['id'])
         with open(meta_path, 'w') as f:
             json.dump(all_meta, f, indent=2)
 
@@ -87,11 +94,14 @@ class CLIPIndexer:
 
         self.index = faiss.read_index(index_path)
         with open(meta_path, 'r') as f:
-            meta = json.load(f)
-        # Sort by id to ensure consistent ordering
-        meta_sorted = sorted(meta, key=lambda x: x['id'])
-        self.paths = [item['path'] for item in meta_sorted]
-        print(f"Loaded index ({self.index.ntotal} vectors) and {len(self.paths)} paths")
+            # The metadata should already be sorted by ID, but we store the whole list
+            self.metadata = json.load(f)
+        
+        # Consistency check
+        if self.index.ntotal != len(self.metadata):
+            raise ValueError("Index size and metadata length do not match.")
+
+        print(f"Loaded index ({self.index.ntotal} vectors) and {len(self.metadata)} metadata entries")
 
     def search(self, query: str, top_k: int = 5) -> list[tuple[str, float]]: 
     # Encode query into embeddings and search the faiss index; we return the scores along with img path  
@@ -101,7 +111,7 @@ class CLIPIndexer:
             txt_emb = txt_emb / txt_emb.norm(dim=-1, keepdim=True)
         q_np = txt_emb.cpu().numpy().astype('float32')
         D, I = self.index.search(q_np, top_k)
-        results = [(self.paths[i], float(D[0][k])) for k, i in enumerate(I[0])]
+        results = [(self.metadata[i]['path'], float(D[0][k])) for k, i in enumerate(I[0])]
         return results
 
 

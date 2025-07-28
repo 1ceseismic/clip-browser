@@ -6,11 +6,13 @@ import io
 import numpy as np
 from PIL import Image
 import queue
+import math
 
 # --- Constants ---
 WINDOW_WIDTH = 1280
 WINDOW_HEIGHT = 720
-THUMBNAIL_SIZE = (128, 128)
+THUMBNAIL_SIZE = 128
+GALLERY_ITEM_WIDTH = 150 # Thumbnail width + padding
 
 # --- Global State ---
 API_URL = ""
@@ -64,23 +66,23 @@ def threaded_api_call(target, on_success=None, on_error=None, **kwargs):
 
 # --- Image & Texture Loading ---
 
-def threaded_load_texture(image_path: str, widget_tag: int, texture_registry_tag: int):
-    """Loads a single thumbnail image in a background thread and applies it to an image widget."""
-    if image_path in g["loaded_textures"]:
-        dpg.set_value(widget_tag, g["loaded_textures"][image_path])
+def threaded_load_texture_from_disk(full_image_path: str, widget_tag: int, texture_registry_tag: int):
+    """
+    Loads a single thumbnail directly from disk in a background thread
+    and applies it to an image widget.
+    """
+    # Use full_image_path as the key for caching
+    if full_image_path in g["loaded_textures"]:
+        if dpg.does_item_exist(widget_tag):
+            dpg.set_value(widget_tag, g["loaded_textures"][full_image_path])
         return
+
     try:
-        url = f"{API_URL}/thumbnail/{image_path}"
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
-        
-        with Image.open(io.BytesIO(response.content)) as img:
+        with Image.open(full_image_path) as img:
+            img.thumbnail((THUMBNAIL_SIZE, THUMBNAIL_SIZE))
             img = img.convert("RGBA")
-            # DearPyGui requires texture data as a 1D float array
             texture_data = np.frombuffer(img.tobytes(), dtype=np.uint8) / 255.0
 
-        # dpg.add_static_texture is thread-safe when a parent is specified.
-        # Do NOT use a 'with' statement here as it's not thread-safe.
         texture_id = dpg.add_static_texture(
             width=img.width,
             height=img.height,
@@ -88,41 +90,54 @@ def threaded_load_texture(image_path: str, widget_tag: int, texture_registry_tag
             parent=texture_registry_tag
         )
         
-        dpg.set_value(widget_tag, texture_id)
-        g["loaded_textures"][image_path] = texture_id
+        if dpg.does_item_exist(widget_tag):
+            dpg.set_value(widget_tag, texture_id)
+        g["loaded_textures"][full_image_path] = texture_id
+
     except Exception as e:
-        print(f"Error loading thumbnail for {image_path}: {e}")
-        # Optionally set a 'failed to load' texture here
+        print(f"Error loading thumbnail from disk for {full_image_path}: {e}")
 
 def display_gallery_images(sender, app_data, user_data):
     """
-    Callback for the main thread. Clears and populates the gallery with image widgets,
-    then loads textures asynchronously.
+    Callback for the main thread. Clears and populates the gallery with image widgets
+    in a grid layout, then loads textures asynchronously from disk.
     """
     image_paths = user_data.get("image_paths", [])
-    search_scores = user_data.get("search_scores") # Can be None
+    search_scores = user_data.get("search_scores")
 
     dpg.delete_item("results_gallery", children_only=True)
     
     if not image_paths:
         dpg.add_text("No images found.", parent="results_gallery")
         return
+    
+    if not g["dataset_root"]:
+        dpg.add_text("Error: Dataset Root is not set.", parent="results_gallery")
+        return
 
-    for i, path in enumerate(image_paths):
-        with dpg.group(horizontal=True, parent="results_gallery"):
-            img_widget_tag = dpg.add_image(g["loading_texture_id"], width=THUMBNAIL_SIZE[0], height=THUMBNAIL_SIZE[1])
-            
-            with dpg.group():
-                # Use a wrap value to prevent long paths from stretching the UI
-                dpg.add_text(os.path.basename(path), wrap=400)
-                if search_scores:
-                    dpg.add_text(f"Score: {search_scores[i]:.4f}")
+    # Calculate how many items can fit in a row
+    gallery_width = dpg.get_item_width("results_gallery")
+    items_per_row = max(1, math.floor(gallery_width / GALLERY_ITEM_WIDTH))
+    
+    count = 0
+    for i, rel_path in enumerate(image_paths):
+        full_path = os.path.join(g["dataset_root"], rel_path)
+        
+        with dpg.group(parent="results_gallery", width=GALLERY_ITEM_WIDTH):
+            img_widget_tag = dpg.add_image(g["loading_texture_id"], width=THUMBNAIL_SIZE, height=THUMBNAIL_SIZE)
+            dpg.add_text(os.path.basename(rel_path), wrap=GALLERY_ITEM_WIDTH - 10)
+            if search_scores:
+                dpg.add_text(f"Score: {search_scores[i]:.4f}")
             
             threading.Thread(
-                target=threaded_load_texture, 
-                args=(path, img_widget_tag, "texture_registry"),
+                target=threaded_load_texture_from_disk, 
+                args=(full_path, img_widget_tag, "texture_registry"),
                 daemon=True
             ).start()
+
+        count += 1
+        if count % items_per_row != 0:
+            dpg.add_same_line(parent="results_gallery")
 
 # --- UI Callbacks ---
 
@@ -200,7 +215,6 @@ def callback_search(sender, app_data):
         paths = [r["path"] for r in results]
         scores = [r["score"] for r in results]
         update_search_status(f"Found {len(results)} results for '{query}'.")
-        # Put the callback and its data into the queue for the main thread to process
         g["ui_update_queue"].put((
             display_gallery_images,
             {"image_paths": paths, "search_scores": scores}
@@ -221,7 +235,6 @@ def load_all_images_from_api():
     def on_success(data):
         paths = data.get("images", [])
         update_search_status(f"Displaying {len(paths)} images.")
-        # Put the callback and its data into the queue for the main thread to process
         g["ui_update_queue"].put((
             display_gallery_images,
             {"image_paths": paths}
@@ -305,8 +318,8 @@ def launch_gui(api_url: str):
     with dpg.texture_registry(tag="texture_registry"):
         # Create a placeholder "loading" texture (a simple grey square)
         loading_pixel = np.array([0.5, 0.5, 0.5, 1.0]) # RGBA
-        loading_data = np.tile(loading_pixel, (THUMBNAIL_SIZE[0] * THUMBNAIL_SIZE[1], 1)).flatten()
-        g["loading_texture_id"] = dpg.add_static_texture(width=THUMBNAIL_SIZE[0], height=THUMBNAIL_SIZE[1], default_value=loading_data)
+        loading_data = np.tile(loading_pixel, (THUMBNAIL_SIZE, THUMBNAIL_SIZE, 1)).flatten()
+        g["loading_texture_id"] = dpg.add_static_texture(width=THUMBNAIL_SIZE, height=THUMBNAIL_SIZE, default_value=loading_data)
 
     setup_ui()
 

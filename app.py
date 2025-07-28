@@ -71,12 +71,6 @@ def startup():
             
             g["indexer"].load_index(INDEX_FILE, METADATA_FILE)
 
-            # Consistency check to prevent IndexError
-            if g["indexer"].index is not None and g["indexer"].paths is not None:
-                if g["indexer"].index.ntotal != len(g["indexer"].paths):
-                    print(f"Index-metadata mismatch! Index has {g['indexer'].index.ntotal} vectors, metadata has {len(g['indexer'].paths)} paths. Discarding loaded index.")
-                    raise ValueError("Inconsistent index and metadata files.")
-
             if not g["indexed_dir"]:
                 raise KeyError("indexed_dir not found in app metadata")
             print(f"Loaded index for '{g['indexed_dir']}' with {g['indexer'].index.ntotal} embeddings.")
@@ -84,7 +78,7 @@ def startup():
     except (FileNotFoundError, KeyError, json.JSONDecodeError, ValueError, AttributeError, RuntimeError) as e:
         print(f"Index files missing or invalid — rebuild using /build-index. Error: {e}")
         g["indexer"].index = None
-        g["indexer"].paths = []
+        g["indexer"].metadata = []
         g["indexed_dir"] = None
 
 
@@ -174,11 +168,11 @@ def get_directories():
 @app.get("/all-images")
 def get_all_images():
     """Returns a list of all image paths from the current index."""
-    if g["indexer"].index is None or g["indexed_dir"] is None or not g["indexer"].paths:
+    if g["indexer"].index is None or g["indexed_dir"] is None or not g["indexer"].metadata:
         return {"images": []}
     
     base_path = g["indexed_dir"]
-    full_paths = [f"{base_path}/{p}" for p in g["indexer"].paths]
+    full_paths = [f"{base_path}/{item['path']}" for item in g["indexer"].metadata]
     return {"images": full_paths}
 
 @app.get("/status", response_model=AppStatus)
