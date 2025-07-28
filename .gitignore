@@ -4,3 +4,11 @@
 /.aider.tags.cache.v4
 .aider*
 *.pt
+*.pyc
+*.pyc
+/.thumbnails
+config.json
+*.index
+metadata.json
+app_metadata.json
+/.indexes
