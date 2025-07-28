@@ -9,7 +9,21 @@ import faiss
 import open_clip
 from PIL import Image
 from torch.utils.data import Dataset, DataLoader
+from sklearn.cluster import KMeans
+import umap
 
+def filter_collate_fn(batch):
+    """
+    A custom collate function that filters out items where the image failed to load.
+    This needs to be a top-level function to be picklable by multiprocessing workers.
+    """
+    # Filter out samples where the image data (at index 1) is None
+    batch = [b for b in batch if b[1] is not None]
+    if not batch:
+        # If the whole batch is bad, return None for all components
+        return None, None, None
+    # Otherwise, use the default collate function on the filtered batch
+    return torch.utils.data.default_collate(batch)
 
 class ImageFolderDataset(Dataset):
     def __init__(self, img_dir: Path, preprocess):
@@ -22,8 +36,16 @@ class ImageFolderDataset(Dataset):
 
     def __getitem__(self, idx):
         path = self.paths[idx]
-        img = Image.open(path).convert('RGB')
-        return idx, self.preprocess(img), str(path)
+        try:
+            with Image.open(path) as img:
+                # Convert to RGBA first to handle palette transparency gracefully, then to RGB.
+                # This is a robust way to handle various image modes before processing.
+                img = img.convert('RGBA').convert('RGB')
+            return idx, self.preprocess(img), str(path)
+        except Exception as e:
+            print(f"Warning: Could not load image {path}, skipping. Error: {e}")
+            # Return None to indicate a failed load
+            return idx, None, str(path)
 
 
 class CLIPIndexer:
@@ -37,43 +59,76 @@ class CLIPIndexer:
         self.model.eval().to(self.device)
         self.tokenizer = open_clip.get_tokenizer(model_name)
         self.index = None
-        self.paths = []
+        self.metadata = []
 
-    def build_index(self,img_dir: str, index_path: str, meta_path: str, batch_size: int = 32, num_workers: int = 4):
+    @property
+    def paths(self):
+        """Returns a list of paths from the metadata."""
+        return [item['path'] for item in self.metadata]
+
+    def build_index(self,img_dir: str, index_path: str, meta_path: str, batch_size: int = 32, num_workers: int = 4, n_clusters: int = 10):
         """
-        Compute embeddings for all images in img_dir, build a FAISS IndexIDMap,
-        and save the index and metadata (paths + optional mtime)
+        Compute embeddings, cluster them, and save the index and metadata.
         """
         img_dir_path = Path(img_dir)
         dataset = ImageFolderDataset(img_dir_path, self.preprocess)
+        
+        # Use the top-level, picklable collate function
         loader = DataLoader(dataset, batch_size=batch_size,
-                            shuffle=False, num_workers=num_workers)
+                            shuffle=False, num_workers=num_workers, collate_fn=filter_collate_fn)
 
         all_embs = []
-        all_meta = []
+        all_meta = [] # Use a list to preserve order from the loader
 
         with torch.no_grad():
             for idxs, images, paths in loader:
+                if idxs is None: continue # Skip empty batches from collate_fn
                 images = images.to(self.device)
                 feats = self.model.encode_image(images)
                 feats = feats / feats.norm(dim=-1, keepdim=True)
                 all_embs.append(feats.cpu().numpy())
-                for i, p_str in zip(idxs.tolist(), paths):
+                
+                # Append metadata for successfully loaded images.
+                # The order is preserved by the DataLoader (shuffle=False).
+                for p_str in paths:
                     p = Path(p_str)
                     stat = p.stat()
-                    # Store path as a relative string with forward slashes for consistency
                     rel_path = p.relative_to(img_dir_path).as_posix()
                     all_meta.append({
-                        'id': i,
                         'path': rel_path,
                         'mtime': stat.st_mtime
                     })
 
+        if not all_embs:
+            print("No images were successfully processed. Index not built.")
+            return
+
         embeddings = np.vstack(all_embs).astype('float32')
+        
+        # --- Clustering and Dimensionality Reduction ---
+        print("Performing clustering...")
+        # Ensure we don't have more clusters than samples
+        actual_n_clusters = min(n_clusters, len(embeddings))
+        kmeans = KMeans(n_clusters=actual_n_clusters, random_state=0, n_init='auto').fit(embeddings)
+        
+        print("Performing UMAP reduction...")
+        reducer = umap.UMAP(n_components=2, random_state=42)
+        umap_coords = reducer.fit_transform(embeddings)
+
+        # --- Finalize Metadata ---
+        # The order of `all_meta` is guaranteed to match the order of `embeddings`,
+        # `kmeans.labels_`, and `umap_coords`.
+        for i, meta_item in enumerate(all_meta):
+            meta_item['id'] = i # Assign new contiguous ID
+            meta_item['cluster_id'] = int(kmeans.labels_[i])
+            meta_item['umap'] = umap_coords[i].tolist()
+
+        # --- Build FAISS Index ---
         dim = embeddings.shape[1]
         index = faiss.IndexFlatIP(dim)
         self.index = faiss.IndexIDMap(index)
-        ids = np.arange(len(embeddings))
+        # Use the new contiguous IDs, which now correctly correspond to the embeddings
+        ids = np.arange(len(all_meta)).astype('int64')
         self.index.add_with_ids(embeddings, ids)
 
         faiss.write_index(self.index, index_path)
@@ -84,24 +139,23 @@ class CLIPIndexer:
 
     def load_index(self, index_path: str, meta_path: str):
         """Load a saved FAISS index and its metadata."""
-
         self.index = faiss.read_index(index_path)
         with open(meta_path, 'r') as f:
-            meta = json.load(f)
-        # Sort by id to ensure consistent ordering
-        meta_sorted = sorted(meta, key=lambda x: x['id'])
-        self.paths = [item['path'] for item in meta_sorted]
-        print(f"Loaded index ({self.index.ntotal} vectors) and {len(self.paths)} paths")
+            self.metadata = json.load(f)
+        
+        if self.index.ntotal != len(self.metadata):
+            raise ValueError("Index size and metadata length do not match.")
+
+        print(f"Loaded index ({self.index.ntotal} vectors) and {len(self.metadata)} metadata entries")
 
     def search(self, query: str, top_k: int = 5) -> list[tuple[str, float]]: 
-    # Encode query into embeddings and search the faiss index; we return the scores along with img path  
         tokens = self.tokenizer([query]).to(self.device)
         with torch.no_grad():
             txt_emb = self.model.encode_text(tokens)
             txt_emb = txt_emb / txt_emb.norm(dim=-1, keepdim=True)
         q_np = txt_emb.cpu().numpy().astype('float32')
         D, I = self.index.search(q_np, top_k)
-        results = [(self.paths[i], float(D[0][k])) for k, i in enumerate(I[0])]
+        results = [(self.metadata[i]['path'], float(D[0][k])) for k, i in enumerate(I[0]) if i != -1]
         return results
 
 
