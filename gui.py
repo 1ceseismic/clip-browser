@@ -558,5 +558,5 @@ def launch_gui(api_url: str):
     dpg.destroy_context()
 
 if __name__ == "__main__":
-    print("Running GUI in standalone mode. Make sure the FastAPI server is running.")
+    print("Running GUI in standalone mode ; Make sure the FastAPI server is running")
     launch_gui(api_url="http://127.0.0.1:8000")
