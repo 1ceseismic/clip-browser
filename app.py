@@ -67,7 +67,7 @@ def startup():
             if not g["indexed_dir"]:
                 raise KeyError("indexed_dir not found in app metadata")
             print(f"Loaded index for '{g['indexed_dir']}' with {g['indexer'].index.ntotal} embeddings.")
-    except (FileNotFoundError, KeyError, json.JSONDecodeError, ValueError, AttributeError) as e:
+    except (FileNotFoundError, KeyError, json.JSONDecodeError, ValueError, AttributeError, RuntimeError) as e:
         print(f"Index files missing or invalid — rebuild using /build-index. Error: {e}")
         g["indexer"].index = None
         g["indexer"].paths = []
