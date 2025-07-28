@@ -76,9 +76,14 @@ def threaded_load_texture(image_path: str, widget_tag: int, texture_registry_tag
             # DearPyGui requires texture data as a 1D float array
             texture_data = np.frombuffer(img.tobytes(), dtype=np.uint8) / 255.0
 
-        # dpg texture calls are thread-safe
-        with dpg.texture_registry(tag=texture_registry_tag):
-            texture_id = dpg.add_static_texture(width=img.width, height=img.height, default_value=texture_data)
+        # dpg.add_static_texture is thread-safe when a parent is specified.
+        # Do NOT use a 'with' statement here as it's not thread-safe.
+        texture_id = dpg.add_static_texture(
+            width=img.width,
+            height=img.height,
+            default_value=texture_data,
+            parent=texture_registry_tag
+        )
         
         dpg.set_value(widget_tag, texture_id)
         g["loaded_textures"][image_path] = texture_id
@@ -86,8 +91,14 @@ def threaded_load_texture(image_path: str, widget_tag: int, texture_registry_tag
         print(f"Error loading thumbnail for {image_path}: {e}")
         # Optionally set a 'failed to load' texture here
 
-def display_gallery_images(image_paths: list, search_scores: list = None):
-    """Clears and populates the gallery with image widgets, then loads textures asynchronously."""
+def display_gallery_images(sender, app_data, user_data):
+    """
+    Callback for the main thread. Clears and populates the gallery with image widgets,
+    then loads textures asynchronously.
+    """
+    image_paths = user_data.get("image_paths", [])
+    search_scores = user_data.get("search_scores") # Can be None
+
     dpg.delete_item("results_gallery", children_only=True)
     
     if not image_paths:
@@ -186,7 +197,8 @@ def callback_search(sender, app_data):
         paths = [r["path"] for r in results]
         scores = [r["score"] for r in results]
         update_status(f"Found {len(results)} results for '{query}'.")
-        display_gallery_images(paths, search_scores=scores)
+        # Schedule the UI update on the main thread
+        dpg.submit_callback(display_gallery_images, user_data={"image_paths": paths, "search_scores": scores})
         g["is_searching"] = False
         dpg.enable_item("search_group")
 
@@ -203,7 +215,8 @@ def load_all_images_from_api():
     def on_success(data):
         paths = data.get("images", [])
         update_status(f"Displaying {len(paths)} images.")
-        display_gallery_images(paths)
+        # Schedule the UI update on the main thread
+        dpg.submit_callback(display_gallery_images, user_data={"image_paths": paths})
 
     threaded_api_call(target=requests.get, on_success=on_success, url=f"{API_URL}/all-images")
 
