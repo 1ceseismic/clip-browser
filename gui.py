@@ -5,6 +5,7 @@ import os
 import io
 import numpy as np
 from PIL import Image
+import queue
 
 # --- Constants ---
 WINDOW_WIDTH = 1280
@@ -23,6 +24,7 @@ g = {
     "index_loaded": False,
     "loaded_textures": {}, # Cache for loaded thumbnail textures {path: texture_id}
     "loading_texture_id": None,
+    "ui_update_queue": queue.Queue(),
 }
 
 # --- GUI Update Helpers ---
@@ -198,11 +200,11 @@ def callback_search(sender, app_data):
         paths = [r["path"] for r in results]
         scores = [r["score"] for r in results]
         update_search_status(f"Found {len(results)} results for '{query}'.")
-        # Schedule the UI update on the main thread using the correct function
-        dpg.mvSubmitCallback(
-            callback=display_gallery_images,
-            user_data={"image_paths": paths, "search_scores": scores}
-        )
+        # Put the callback and its data into the queue for the main thread to process
+        g["ui_update_queue"].put((
+            display_gallery_images,
+            {"image_paths": paths, "search_scores": scores}
+        ))
         g["is_searching"] = False
         dpg.enable_item("search_group")
 
@@ -219,11 +221,11 @@ def load_all_images_from_api():
     def on_success(data):
         paths = data.get("images", [])
         update_search_status(f"Displaying {len(paths)} images.")
-        # Schedule the UI update on the main thread using the correct function
-        dpg.mvSubmitCallback(
-            callback=display_gallery_images,
-            user_data={"image_paths": paths}
-        )
+        # Put the callback and its data into the queue for the main thread to process
+        g["ui_update_queue"].put((
+            display_gallery_images,
+            {"image_paths": paths}
+        ))
 
     threaded_api_call(target=requests.get, on_success=on_success, url=f"{API_URL}/all-images")
 
@@ -306,7 +308,7 @@ def launch_gui(api_url: str):
         loading_data = np.tile(loading_pixel, (THUMBNAIL_SIZE[0] * THUMBNAIL_SIZE[1], 1)).flatten()
         g["loading_texture_id"] = dpg.add_static_texture(width=THUMBNAIL_SIZE[0], height=THUMBNAIL_SIZE[1], default_value=loading_data)
 
-    setup_ui()
+    setup_.ui()
 
     dpg.create_viewport(title="CLIP Semantic Search", width=WINDOW_WIDTH, height=WINDOW_HEIGHT)
     dpg.setup_dearpygui()
@@ -315,7 +317,19 @@ def launch_gui(api_url: str):
 
     initialize_app_state()
 
-    dpg.start_dearpygui()
+    # --- Main Render Loop ---
+    while dpg.is_dearpygui_running():
+        # Check for and process UI updates from the queue
+        try:
+            while not g["ui_update_queue"].empty():
+                callback, user_data = g["ui_update_queue"].get_nowait()
+                # Call the function with dummy sender and app_data
+                callback(None, None, user_data)
+        except queue.Empty:
+            pass # This is expected when the queue is empty
+
+        dpg.render_dearpygui_frame()
+
     dpg.destroy_context()
 
 if __name__ == "__main__":
