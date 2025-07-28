@@ -43,6 +43,10 @@ def update_status(text: str, status_widget="search_status_text"):
 
 def threaded_api_call(target, on_success=None, on_error=None, **kwargs):
     """Generic wrapper to run API calls in a background thread."""
+    # Set a default timeout for all API calls unless specified otherwise.
+    # The build-index call passes a longer timeout, which will override this.
+    kwargs.setdefault('timeout', 30)
+
     def thread_target():
         try:
             response = target(**kwargs)

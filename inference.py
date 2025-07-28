@@ -78,7 +78,7 @@ class CLIPIndexer:
                             shuffle=False, num_workers=num_workers, collate_fn=filter_collate_fn)
 
         all_embs = []
-        all_meta_map = {} # Use a map to handle filtered items
+        all_meta = [] # Use a list to preserve order from the loader
 
         with torch.no_grad():
             for idxs, images, paths in loader:
@@ -87,15 +87,17 @@ class CLIPIndexer:
                 feats = self.model.encode_image(images)
                 feats = feats / feats.norm(dim=-1, keepdim=True)
                 all_embs.append(feats.cpu().numpy())
-                for i, p_str in zip(idxs.tolist(), paths):
+                
+                # Append metadata for successfully loaded images.
+                # The order is preserved by the DataLoader (shuffle=False).
+                for p_str in paths:
                     p = Path(p_str)
                     stat = p.stat()
                     rel_path = p.relative_to(img_dir_path).as_posix()
-                    all_meta_map[i] = {
-                        'id': i,
+                    all_meta.append({
                         'path': rel_path,
                         'mtime': stat.st_mtime
-                    }
+                    })
 
         if not all_embs:
             print("No images were successfully processed. Index not built.")
@@ -114,26 +116,24 @@ class CLIPIndexer:
         umap_coords = reducer.fit_transform(embeddings)
 
         # --- Finalize Metadata ---
-        final_meta = []
-        valid_ids = sorted(all_meta_map.keys())
-        for new_id, old_id in enumerate(valid_ids):
-            meta_item = all_meta_map[old_id]
-            meta_item['id'] = new_id # Re-index to be contiguous
-            meta_item['cluster_id'] = int(kmeans.labels_[new_id])
-            meta_item['umap'] = umap_coords[new_id].tolist()
-            final_meta.append(meta_item)
+        # The order of `all_meta` is guaranteed to match the order of `embeddings`,
+        # `kmeans.labels_`, and `umap_coords`.
+        for i, meta_item in enumerate(all_meta):
+            meta_item['id'] = i # Assign new contiguous ID
+            meta_item['cluster_id'] = int(kmeans.labels_[i])
+            meta_item['umap'] = umap_coords[i].tolist()
 
         # --- Build FAISS Index ---
         dim = embeddings.shape[1]
         index = faiss.IndexFlatIP(dim)
         self.index = faiss.IndexIDMap(index)
-        # Use the new contiguous IDs
-        ids = np.arange(len(final_meta)).astype('int64')
+        # Use the new contiguous IDs, which now correctly correspond to the embeddings
+        ids = np.arange(len(all_meta)).astype('int64')
         self.index.add_with_ids(embeddings, ids)
 
         faiss.write_index(self.index, index_path)
         with open(meta_path, 'w') as f:
-            json.dump(final_meta, f, indent=2)
+            json.dump(all_meta, f, indent=2)
 
         print(f"Index saved to {index_path}, metadata saved to {meta_path}")
 
