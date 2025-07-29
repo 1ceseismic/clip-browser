@@ -162,7 +162,7 @@ def load_resources_task():
     with _resource_lock:
         if g["indexer"] is None:
             g["indexer"] = CLIPIndexer(model_name="ViT-B-32", pretrained="openai")
-        
+            
         last_root = config.get_last_used_path()
         if last_root:
             _find_and_load_latest_index_for_root(Path(last_root))
