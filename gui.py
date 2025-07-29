@@ -597,6 +597,7 @@ def initialize_app_state():
     def load_initial_data():
         def on_success(data):
             g["models"] = data.get("models", [])
+            print(f"DEBUG: Received models from API: {g['models']}")
             dpg.configure_item("model_selector", items=g["models"])
         
         threaded_api_call(target=requests.get, on_success=on_success, url=f"{API_URL}/models")
