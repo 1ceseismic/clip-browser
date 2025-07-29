@@ -233,6 +233,8 @@ def _handle_status_update(sender, app_data, user_data):
 
     if g["dataset_root"]:
         dpg.set_value("dataset_root_text", f"Current Root: {g['dataset_root']}")
+    else:
+        dpg.set_value("dataset_root_text", "Current Root: Not Set")
     
     if g["dataset_root"] and g["model_loaded"]:
         threaded_api_call(target=requests.get, on_success=on_get_directories_success, url=f"{API_URL}/directories")
@@ -246,18 +248,36 @@ def _handle_status_update(sender, app_data, user_data):
             load_umap_data()
     else:
         dpg.disable_item("search_group")
+        _clear_main_views(None, None, None) # Clear views first
+
+        status_msg, placeholder_gallery, placeholder_sidebar, placeholder_umap = "", "", "", ""
+
         if not g["model_loaded"]:
-            update_status("Loading model, please wait...")
+            status_msg = "Loading model, please wait..."
+            placeholder_gallery = "Model is loading, please wait. This can take a moment on first launch."
+            placeholder_sidebar = "Waiting for model to load."
+            placeholder_umap = "Waiting for model to load."
         elif not g["dataset_root"]:
-             update_status("Model loaded. Please select a dataset root to begin.")
+            status_msg = "Model loaded. Please select a dataset root to begin."
+            placeholder_gallery = "Please select a dataset root from the File menu."
+            placeholder_sidebar = "Please select a dataset root."
+            placeholder_umap = "Please select a dataset root."
         else:
-             update_status("Model loaded. No index found for this root. Please build an index.")
+            status_msg = "Model loaded. No index found for this root. Please build an index."
+            placeholder_gallery = "No index found for this directory.\n\nPlease select a subdirectory and click 'Build Index'."
+            placeholder_sidebar = "Please build an index first."
+            placeholder_umap = "Please build an index to see UMAP data."
+        
+        update_status(status_msg)
+        if dpg.does_item_exist("search_gallery"): dpg.add_text(placeholder_gallery, parent="search_gallery")
+        if dpg.does_item_exist("cluster_sidebar"): dpg.add_text(placeholder_sidebar, parent="cluster_sidebar")
+        if dpg.does_item_exist("cluster_gallery"): dpg.add_text("Select a cluster to view images.", parent="cluster_gallery")
+        update_status(placeholder_umap, "umap_status_text")
 
 def _clear_main_views(sender, app_data, user_data):
     """(Main Thread) Clears all data views in the UI to prepare for new data."""
     if dpg.does_item_exist("search_gallery"):
         dpg.delete_item("search_gallery", children_only=True)
-        dpg.add_text("Loading...", parent="search_gallery")
     if dpg.does_item_exist("cluster_gallery"):
         dpg.delete_item("cluster_gallery", children_only=True)
     if dpg.does_item_exist("cluster_sidebar"):
@@ -318,6 +338,7 @@ def on_get_directories_success(data):
 def callback_build_index(sender, app_data):
     if not g["selected_subdir"] or g["is_indexing"]: return
     g["is_indexing"] = True
+    dpg.configure_item("indexing_progress_bar", show=True)
     dpg.disable_item("build_index_button")
     dpg.disable_item("select_root_menu_item")
     update_status(f"Building index for '{g['selected_subdir']}'. This may take a while...")
@@ -325,12 +346,14 @@ def callback_build_index(sender, app_data):
     def on_success(data):
         # The status poller will pick up the change.
         g["is_indexing"] = False
+        dpg.configure_item("indexing_progress_bar", show=False)
         dpg.enable_item("build_index_button")
         dpg.enable_item("select_root_menu_item")
 
     def on_error(error_message):
         update_status(f"Error building index: {error_message}")
         g["is_indexing"] = False
+        dpg.configure_item("indexing_progress_bar", show=False)
         dpg.enable_item("build_index_button")
         dpg.enable_item("select_root_menu_item")
 
@@ -584,6 +607,7 @@ def setup_ui():
                 with dpg.child_window(tag="search_gallery", width=-1):
                     dpg.add_text("Build an index or perform a search to see images here.")
                 dpg.add_separator()
+                dpg.add_progress_bar(tag="indexing_progress_bar", show=False, overlay="Indexing...", width=-1)
                 dpg.add_text("Initializing...", tag="search_status_text")
 
             with dpg.tab(label="Clusters"):
