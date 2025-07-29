@@ -3,6 +3,7 @@ from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from inference import CLIPIndexer
+import open_clip
 import threading
 import os
 from pathlib import Path
@@ -36,6 +37,8 @@ app.add_middleware(
 # --- Global State ---
 g = {
     "indexer": None, # Will be loaded in a background thread
+    "model_name": None,
+    "pretrained_tag": None,
     "indexed_dir": None,
     "dataset_root": None, # Will be set by the user via an API call
 }
@@ -43,6 +46,10 @@ _resource_lock = threading.Lock()
 
 class PathRequest(BaseModel):
     path: str
+
+class ModelLoadRequest(BaseModel):
+    model_name: str
+    pretrained: str
 
 class SearchResponse(BaseModel):
     query: str
@@ -52,6 +59,8 @@ class AppStatus(BaseModel):
     dataset_root: Optional[str]
     indexed_dir: Optional[str]
     model_loaded: bool
+    model_name: Optional[str]
+    pretrained_tag: Optional[str]
     index_loaded: bool
     indexed_image_count: int
     has_clusters: bool
@@ -153,19 +162,35 @@ def _find_and_load_latest_index_for_root(root_path: Path):
     else:
         print(f"Could not determine latest index for root: {root_path}")
 
+def _load_model(model_name: str, pretrained: str):
+    """Loads a new CLIP model. Must be called within a lock."""
+    print(f"Loading model: {model_name} with pretrained weights: {pretrained}")
+    try:
+        g["indexer"] = CLIPIndexer(model_name=model_name, pretrained=pretrained)
+        g["model_name"] = model_name
+        g["pretrained_tag"] = pretrained
+    except Exception as e:
+        print(f"Failed to load model {model_name}/{pretrained}: {e}")
+        g["indexer"] = None
+        g["model_name"] = None
+        g["pretrained_tag"] = None
+
 def load_resources_task():
     """
     Background task to load the heavy CLIP model and the last used index.
     This runs after the server has started to keep startup times fast.
     """
-    print("Background task started: Loading CLIP model and index...")
+    print("Background task started: Loading default CLIP model and last index...")
     with _resource_lock:
         if g["indexer"] is None:
-            g["indexer"] = CLIPIndexer(model_name="ViT-B-32", pretrained="openai")
+            _clear_index_state()
+            # Load a default model
+            _load_model(model_name="ViT-B-32", pretrained="openai")
             
-        last_root = config.get_last_used_path()
-        if last_root:
-            _find_and_load_latest_index_for_root(Path(last_root))
+            # Then, try to load the last used index
+            last_root = config.get_last_used_path()
+            if last_root:
+                _find_and_load_latest_index_for_root(Path(last_root))
     print("Background task finished: Resources loaded.")
 
 
@@ -197,7 +222,7 @@ def set_dataset_root(payload: PathRequest):
     return {"status": "ok", "path": str(new_root)}
 
 @app.post("/build-index")
-def build_index(img_dir: str, checkpoint: str = "openai"):
+def build_index(img_dir: str):
     """Build or rebuild the FAISS index from a subdirectory of the dataset root."""
     with _resource_lock:
         if g["indexer"] is None:
@@ -279,11 +304,18 @@ def get_all_images():
 @app.get("/all-metadata", response_model=AllMetadataResponse)
 def get_all_metadata():
     with _resource_lock:
-        if g["indexer"] is None or not g["indexer"].metadata:
+        if g["indexer"] is None or not g["indexer"].metadata or g["indexed_dir"] is None:
             return {"metadata": []}
         
-        metadata = g["indexer"].metadata
-    return {"metadata": metadata}
+        base_path = g["indexed_dir"]
+        # Create a copy and update paths to be relative to the root
+        metadata_with_full_paths = []
+        for item in g["indexer"].metadata:
+            new_item = item.copy()
+            new_item['path'] = os.path.join(base_path, item['path']).replace('\\', '/')
+            metadata_with_full_paths.append(new_item)
+
+    return {"metadata": metadata_with_full_paths}
 
 @app.get("/status", response_model=AppStatus)
 def get_status():
@@ -303,6 +335,8 @@ def get_status():
             dataset_root=str(g["dataset_root"]) if g.get("dataset_root") else None,
             indexed_dir=g.get("indexed_dir"),
             model_loaded=model_loaded,
+            model_name=g.get("model_name"),
+            pretrained_tag=g.get("pretrained_tag"),
             index_loaded=index_loaded,
             indexed_image_count=count,
             has_clusters=has_clusters
@@ -400,3 +434,28 @@ def get_image(image_path: str):
         raise HTTPException(status_code=404, detail="Image not found")
     
     return FileResponse(str(full_path))
+
+@app.post("/load-model")
+def load_model(payload: ModelLoadRequest):
+    """Loads a new model in a background thread."""
+    def task():
+        with _resource_lock:
+            _clear_index_state()
+            _load_model(model_name=payload.model_name, pretrained=payload.pretrained)
+            # After loading new model, if a root is set, try to find an index for it
+            if g.get("dataset_root"):
+                _find_and_load_latest_index_for_root(g["dataset_root"])
+    
+    thread = threading.Thread(target=task, daemon=True)
+    thread.start()
+    return {"status": "Model loading started in background."}
+
+@app.get("/models")
+def get_models():
+    """Returns a list of available model architectures."""
+    return {"models": open_clip.list_models()}
+
+@app.get("/pretrained-for-model")
+def get_pretrained_for_model(model_name: str):
+    """Returns a list of available pretrained tags for a given model."""
+    return {"tags": open_clip.list_pretrained_tags_by_model(model_name)}

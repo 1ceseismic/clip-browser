@@ -12,6 +12,7 @@ import sys
 import config
 import colorsys
 import time
+from scipy.spatial import KDTree
 
 # --- Constants ---
 WINDOW_WIDTH = 1280
@@ -28,12 +29,20 @@ g = {
     "selected_subdir": None,
     "is_indexing": False,
     "is_searching": False,
+    "is_loading_model": False,
     "model_loaded": False,
     "index_loaded": False,
     "loading_texture_id": None,
     "ui_update_queue": queue.Queue(),
-    "umap_series_tags": [], # To hold tags of UMAP plot series for deletion
-    "score_plot_series_tag": None, # To hold the tag for the score plot series
+    "umap_series_tags": [],
+    "score_plot_series_tag": None,
+    "umap_kdtree": None,
+    "umap_metadata": None,
+    "last_umap_hover_idx": -1,
+    "models": [],
+    "selected_model": None,
+    "pretrained_tags": [],
+    "selected_pretrained": None,
 }
 
 # --- GUI Update Helpers ---
@@ -227,8 +236,21 @@ def _update_score_distribution_plot(sender, app_data, user_data):
 def _handle_status_update(sender, app_data, user_data):
     """Shared logic to update UI based on app status response."""
     data = user_data
-    g["dataset_root"] = data.get("dataset_root")
+    
+    # Handle model loading state
+    was_loading_model = g["is_loading_model"]
     g["model_loaded"] = data.get("model_loaded", False)
+    if was_loading_model and g["model_loaded"]:
+        g["is_loading_model"] = False
+        dpg.enable_item("model_controls_group")
+        update_status("Model loaded successfully.")
+
+    model_name = data.get("model_name", "N/A")
+    pretrained = data.get("pretrained_tag", "N/A")
+    if dpg.does_item_exist("loaded_model_text"):
+        dpg.set_value("loaded_model_text", f"Loaded Model: {model_name} ({pretrained})")
+
+    g["dataset_root"] = data.get("dataset_root")
     g["index_loaded"] = data.get("index_loaded", False)
 
     if g["dataset_root"]:
@@ -252,7 +274,12 @@ def _handle_status_update(sender, app_data, user_data):
 
         status_msg, placeholder_gallery, placeholder_sidebar, placeholder_umap = "", "", "", ""
 
-        if not g["model_loaded"]:
+        if g["is_loading_model"]:
+            status_msg = "Loading new model, please wait..."
+            placeholder_gallery = "A new model is loading. The UI will update when it's ready."
+            placeholder_sidebar = "Waiting for new model to load."
+            placeholder_umap = "Waiting for new model to load."
+        elif not g["model_loaded"]:
             status_msg = "Loading model, please wait..."
             placeholder_gallery = "Model is loading, please wait. This can take a moment on first launch."
             placeholder_sidebar = "Waiting for model to load."
@@ -499,6 +526,16 @@ def _update_umap_plot(metadata):
 
 def _on_get_umap_data_success(data):
     metadata = data.get("metadata", [])
+    
+    # Store metadata and build KD-Tree for hover-preview
+    g["umap_metadata"] = [item for item in metadata if 'umap' in item and item['umap']]
+    if g["umap_metadata"]:
+        umap_coords = np.array([item['umap'] for item in g["umap_metadata"]])
+        g["umap_kdtree"] = KDTree(umap_coords)
+    else:
+        g["umap_kdtree"] = None
+        g["umap_metadata"] = None
+
     g["ui_update_queue"].put((lambda s, a, u: _update_umap_plot(u), metadata))
 
 def load_umap_data():
@@ -556,7 +593,15 @@ def status_poller():
         time.sleep(2) # Poll every 2 seconds
 
 def initialize_app_state():
-    """Starts the background thread that polls for server status."""
+    """Starts the background thread that polls for server status and loads initial data."""
+    def load_initial_data():
+        def on_success(data):
+            g["models"] = data.get("models", [])
+            dpg.configure_item("model_selector", items=g["models"])
+        
+        threaded_api_call(target=requests.get, on_success=on_success, url=f"{API_URL}/models")
+
+    load_initial_data()
     poller_thread = threading.Thread(target=status_poller, daemon=True)
     poller_thread.start()
 
@@ -574,6 +619,55 @@ def rebuild_recent_files_menu():
         return
     for path in recent_paths:
         dpg.add_menu_item(label=path, parent="recent_files_menu", callback=callback_set_recent_root, user_data=path)
+
+def on_model_selected(sender, app_data):
+    g["selected_model"] = app_data
+    dpg.configure_item("pretrained_selector", items=[])
+    dpg.set_value("pretrained_selector", "")
+    dpg.disable_item("load_model_button")
+    
+    def on_success(data):
+        g["pretrained_tags"] = data.get("tags", [])
+        dpg.configure_item("pretrained_selector", items=g["pretrained_tags"])
+        if g["pretrained_tags"]:
+            g["selected_pretrained"] = g["pretrained_tags"][0]
+            dpg.set_value("pretrained_selector", g["selected_pretrained"])
+            dpg.enable_item("load_model_button")
+
+    threaded_api_call(target=requests.get, on_success=on_success, url=f"{API_URL}/pretrained-for-model", params={"model_name": app_data})
+
+def on_pretrained_selected(sender, app_data):
+    g["selected_pretrained"] = app_data
+    if app_data:
+        dpg.enable_item("load_model_button")
+    else:
+        dpg.disable_item("load_model_button")
+
+def callback_load_model(sender, app_data):
+    if not g["selected_model"] or not g["selected_pretrained"] or g["is_loading_model"]:
+        return
+    
+    g["is_loading_model"] = True
+    dpg.disable_item("model_controls_group")
+    update_status(f"Loading model: {g['selected_model']} ({g['selected_pretrained']})...")
+    _clear_main_views(None, None, None)
+
+    def on_success(data):
+        # Status poller will detect the change and update the UI state
+        pass
+    
+    def on_error(error_message):
+        update_status(f"Failed to start model load: {error_message}")
+        g["is_loading_model"] = False
+        dpg.enable_item("model_controls_group")
+
+    threaded_api_call(
+        target=requests.post,
+        on_success=on_success,
+        on_error=on_error,
+        url=f"{API_URL}/load-model",
+        json={"model_name": g["selected_model"], "pretrained": g["selected_pretrained"]}
+    )
 
 # --- UI Setup ---
 
@@ -593,6 +687,14 @@ def setup_ui():
                         dpg.add_text("Index Target:")
                         dpg.add_combo(items=g["subdirectories"], tag="subdir_selector", callback=callback_subdir_selected, width=250, enabled=False)
                         dpg.add_button(label="Build Index", tag="build_index_button", callback=callback_build_index, enabled=False)
+                dpg.add_separator()
+                with dpg.group(tag="model_controls_group"):
+                    with dpg.group(horizontal=True):
+                        dpg.add_text("CLIP Model:")
+                        dpg.add_combo(items=g["models"], tag="model_selector", callback=on_model_selected, width=200)
+                        dpg.add_combo(items=g["pretrained_tags"], tag="pretrained_selector", callback=on_pretrained_selected, width=200)
+                        dpg.add_button(label="Load Model", tag="load_model_button", callback=callback_load_model, enabled=False)
+                    dpg.add_text("Loaded Model: N/A", tag="loaded_model_text")
                 dpg.add_separator()
                 with dpg.group(tag="search_group", enabled=False):
                     with dpg.group(horizontal=True):
@@ -628,7 +730,6 @@ def setup_ui():
                             dpg.add_plot_axis(dpg.mvYAxis, label="UMAP 2", tag="umap_plot_y_axis")
                     with dpg.child_window(width=250):
                         dpg.add_text("Image Preview")
-                        dpg.add_text("(Hover not yet implemented)", color=(255, 255, 0))
                         dpg.add_image(g["loading_texture_id"], tag="umap_preview_image", width=240, height=240)
                 dpg.add_separator()
                 dpg.add_text("Status", tag="umap_status_text")
@@ -667,6 +768,23 @@ def launch_gui(api_url: str):
                     callback(None, None, user_data)
         except queue.Empty:
             pass
+        
+        # UMAP hover logic
+        if dpg.is_item_hovered("umap_plot") and g.get("umap_kdtree"):
+            mouse_pos = dpg.get_plot_mouse_pos()
+            if mouse_pos and g.get("dataset_root"):
+                dist, idx = g["umap_kdtree"].query(mouse_pos)
+                if idx != g.get("last_umap_hover_idx"):
+                    g["last_umap_hover_idx"] = idx
+                    item = g["umap_metadata"][idx]
+                    rel_path = item['path']
+                    full_path = os.path.join(g["dataset_root"], rel_path)
+                    
+                    threading.Thread(
+                        target=threaded_load_texture_from_disk,
+                        args=(full_path, "umap_preview_image", "texture_registry", (240, 240)),
+                        daemon=True
+                    ).start()
 
         dpg.render_dearpygui_frame()
 
