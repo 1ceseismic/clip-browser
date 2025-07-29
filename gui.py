@@ -549,6 +549,15 @@ def load_umap_data():
 
 # --- App Initialization ---
 
+def load_initial_data():
+    """Fetches initial data like available models from the API."""
+    def on_success(data):
+        g["models"] = data.get("models", [])
+        print(f"DEBUG: Received models from API: {g['models']}")
+        dpg.configure_item("model_selector", items=g["models"])
+    
+    threaded_api_call(target=requests.get, on_success=on_success, url=f"{API_URL}/models")
+
 def status_poller():
     """
     Runs in a background thread, periodically checking the server status
@@ -556,6 +565,7 @@ def status_poller():
     """
     last_known_status = {"model_loaded": None, "index_loaded": None, "dataset_root": None}
     server_was_connected = False # Track connection state
+    initial_data_loaded = False
 
     while dpg.is_dearpygui_running():
         try:
@@ -566,6 +576,9 @@ def status_poller():
             if not server_was_connected:
                 server_was_connected = True
                 print("Successfully connected to server.")
+                if not initial_data_loaded:
+                    load_initial_data()
+                    initial_data_loaded = True
 
             # Check if the relevant state has changed
             if (current_status.get("model_loaded") != last_known_status.get("model_loaded") or
@@ -593,16 +606,7 @@ def status_poller():
         time.sleep(2) # Poll every 2 seconds
 
 def initialize_app_state():
-    """Starts the background thread that polls for server status and loads initial data."""
-    def load_initial_data():
-        def on_success(data):
-            g["models"] = data.get("models", [])
-            print(f"DEBUG: Received models from API: {g['models']}")
-            dpg.configure_item("model_selector", items=g["models"])
-        
-        threaded_api_call(target=requests.get, on_success=on_success, url=f"{API_URL}/models")
-
-    load_initial_data()
+    """Starts the background thread that polls for server status."""
     poller_thread = threading.Thread(target=status_poller, daemon=True)
     poller_thread.start()
 
