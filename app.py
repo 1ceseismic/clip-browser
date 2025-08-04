@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
 from pydantic import BaseModel
 from inference import CLIPIndexer
 import open_clip
@@ -14,6 +15,7 @@ from collections import defaultdict
 import config
 import hashlib
 from datetime import datetime, timezone
+from training import training_manager
 
 # --- Configuration ---
 IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png'}
@@ -23,7 +25,16 @@ THUMBNAIL_MAX_SIZE = (256, 256)
 # Create cache directory if it doesn't exist
 THUMBNAIL_CACHE_DIR.mkdir(exist_ok=True)
 
-app = FastAPI(title="CLIP Semantic Search API")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    thread = threading.Thread(target=load_resources_task, daemon=True)
+    thread.start()
+    yield
+    # Shutdown
+    pass
+
+app = FastAPI(title="CLIP Semantic Search API", lifespan=lifespan)
 
 # --- CORS Middleware ---
 app.add_middleware(
@@ -79,6 +90,27 @@ class ClusterImagesResponse(BaseModel):
 
 class AllMetadataResponse(BaseModel):
     metadata: List[Dict[str, Any]]
+
+class TrainingDataRequest(BaseModel):
+    dataset_root: str
+    test_size: float = 0.2
+
+class TextAugmentationRequest(BaseModel):
+    dataset_root: str
+    method: str = "llm"
+    num_aug: int = 3
+
+class TrainingRequest(BaseModel):
+    dataset_root: str
+    model_name: str = "ViT-B-32"
+    pretrained: str = "openai"
+    epochs: int = 10
+    batch_size: int = 32
+    learning_rate: float = 1e-4
+    warmup_steps: int = 10000
+
+class ManualCaptioningRequest(BaseModel):
+    dataset_root: str
 
 
 # --- Internal Logic ---
@@ -196,13 +228,7 @@ def load_resources_task():
 
 # --- API Endpoints ---
 
-@app.on_event("startup")
-def startup():
-    """
-    Starts a background thread to load resources, keeping the server startup non-blocking.
-    """
-    thread = threading.Thread(target=load_resources_task, daemon=True)
-    thread.start()
+# Startup is now handled in the lifespan context manager
 
 
 @app.post("/set-dataset-root")
@@ -459,3 +485,77 @@ def get_models():
 def get_pretrained_for_model(model_name: str):
     """Returns a list of available pretrained tags for a given model."""
     return {"tags": open_clip.list_pretrained_tags_by_model(model_name)}
+
+# --- Training Endpoints ---
+
+@app.post("/prepare-training-data")
+def prepare_training_data(payload: TrainingDataRequest):
+    """Prepare training data by splitting the dataset into train/val sets."""
+    def task():
+        result = training_manager.prepare_training_data(payload.dataset_root, payload.test_size)
+        print(f"Training data preparation result: {result}")
+    
+    thread = threading.Thread(target=task, daemon=True)
+    thread.start()
+    return {"status": "Training data preparation started in background."}
+
+@app.post("/run-text-augmentation")
+def run_text_augmentation(payload: TextAugmentationRequest):
+    """Run text augmentation on the training data."""
+    def task():
+        result = training_manager.run_text_augmentation(
+            payload.dataset_root, 
+            payload.method, 
+            payload.num_aug
+        )
+        print(f"Text augmentation result: {result}")
+    
+    thread = threading.Thread(target=task, daemon=True)
+    thread.start()
+    return {"status": "Text augmentation started in background."}
+
+@app.post("/start-training")
+def start_training(payload: TrainingRequest):
+    """Start CLIP fine-tuning training."""
+    def task():
+        result = training_manager.start_training(
+            dataset_root=payload.dataset_root,
+            model_name=payload.model_name,
+            pretrained=payload.pretrained,
+            epochs=payload.epochs,
+            batch_size=payload.batch_size,
+            learning_rate=payload.learning_rate,
+            warmup_steps=payload.warmup_steps
+        )
+        print(f"Training result: {result}")
+    
+    thread = threading.Thread(target=task, daemon=True)
+    thread.start()
+    return {"status": "Training started in background."}
+
+@app.post("/stop-training")
+def stop_training():
+    """Stop the current training process."""
+    training_manager.stop_training()
+    return {"status": "Training stop requested."}
+
+@app.get("/training-status")
+def get_training_status():
+    """Get the current training status and progress."""
+    return training_manager.get_training_status()
+
+@app.post("/run-manual-captioning")
+def run_manual_captioning(payload: ManualCaptioningRequest):
+    """Run the manual captioning tool."""
+    def task():
+        result = training_manager.run_manual_captioning(payload.dataset_root)
+        print(f"Manual captioning result: {result}")
+    
+    thread = threading.Thread(target=task, daemon=True)
+    thread.start()
+    return {"status": "Manual captioning started in background."}
+
+@app.get("/validate-training-ready")
+def validate_training_ready(dataset_root: str):
+    """Validate that all required files exist for training."""
+    return training_manager.validate_training_ready(dataset_root)

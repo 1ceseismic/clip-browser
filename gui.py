@@ -609,6 +609,10 @@ def initialize_app_state():
     """Starts the background thread that polls for server status."""
     poller_thread = threading.Thread(target=status_poller, daemon=True)
     poller_thread.start()
+    
+    # Start training status poller
+    training_poller_thread = threading.Thread(target=training_status_poller, daemon=True)
+    training_poller_thread.start()
 
 def callback_set_recent_root(sender, app_data, user_data):
     """Callback for recent file menu items to set the dataset root."""
@@ -673,6 +677,221 @@ def callback_load_model(sender, app_data):
         url=f"{API_URL}/load-model",
         json={"model_name": g["selected_model"], "pretrained": g["selected_pretrained"]}
     )
+
+# --- Training Callbacks ---
+
+def callback_start_manual_captioning(sender, app_data):
+    if not g["dataset_root"]:
+        update_status("Error: Please select a dataset root first.")
+        return
+    
+    dpg.set_value("manual_captioning_status", "Status: Starting...")
+    
+    def on_success(data):
+        dpg.set_value("manual_captioning_status", "Status: Manual captioning started")
+        update_status("Manual captioning interface launched. Please complete the captioning process.")
+    
+    def on_error(error_message):
+        dpg.set_value("manual_captioning_status", "Status: Failed")
+        update_status(f"Failed to start manual captioning: {error_message}")
+    
+    threaded_api_call(
+        target=requests.post,
+        on_success=on_success,
+        on_error=on_error,
+        url=f"{API_URL}/run-manual-captioning",
+        json={"dataset_root": g["dataset_root"]}
+    )
+
+def callback_prepare_training_data(sender, app_data):
+    if not g["dataset_root"]:
+        update_status("Error: Please select a dataset root first.")
+        return
+    
+    dpg.set_value("data_prep_status", "Status: Preparing...")
+    
+    def on_success(data):
+        dpg.set_value("data_prep_status", "Status: Data preparation started")
+        update_status("Training data preparation started in background.")
+    
+    def on_error(error_message):
+        dpg.set_value("data_prep_status", "Status: Failed")
+        update_status(f"Failed to prepare training data: {error_message}")
+    
+    threaded_api_call(
+        target=requests.post,
+        on_success=on_success,
+        on_error=on_error,
+        url=f"{API_URL}/prepare-training-data",
+        json={"dataset_root": g["dataset_root"], "test_size": 0.2}
+    )
+
+def callback_run_text_augmentation(sender, app_data):
+    if not g["dataset_root"]:
+        update_status("Error: Please select a dataset root first.")
+        return
+    
+    method = dpg.get_value("augmentation_method")
+    num_aug = dpg.get_value("num_augmentations")
+    
+    dpg.set_value("augmentation_status", "Status: Running...")
+    
+    def on_success(data):
+        dpg.set_value("augmentation_status", "Status: Text augmentation started")
+        update_status("Text augmentation started in background.")
+    
+    def on_error(error_message):
+        dpg.set_value("augmentation_status", "Status: Failed")
+        update_status(f"Failed to run text augmentation: {error_message}")
+    
+    threaded_api_call(
+        target=requests.post,
+        on_success=on_success,
+        on_error=on_error,
+        url=f"{API_URL}/run-text-augmentation",
+        json={"dataset_root": g["dataset_root"], "method": method, "num_aug": num_aug}
+    )
+
+def callback_start_training(sender, app_data):
+    if not g["dataset_root"]:
+        update_status("Error: Please select a dataset root first.")
+        return
+    
+    # First validate that training is ready
+    def on_validation_success(data):
+        if data.get("ready", False):
+            # Proceed with training
+            model_name = dpg.get_value("training_model")
+            pretrained = dpg.get_value("training_pretrained")
+            epochs = dpg.get_value("training_epochs")
+            batch_size = dpg.get_value("training_batch_size")
+            learning_rate = dpg.get_value("training_lr")
+            warmup_steps = dpg.get_value("training_warmup")
+            
+            dpg.set_value("training_status", "Status: Starting...")
+            
+            def on_success(data):
+                dpg.set_value("training_status", "Status: Training started")
+                update_status("CLIP fine-tuning started in background.")
+            
+            def on_error(error_message):
+                dpg.set_value("training_status", "Status: Failed")
+                update_status(f"Failed to start training: {error_message}")
+            
+            threaded_api_call(
+                target=requests.post,
+                on_success=on_success,
+                on_error=on_error,
+                url=f"{API_URL}/start-training",
+                json={
+                    "dataset_root": g["dataset_root"],
+                    "model_name": model_name,
+                    "pretrained": pretrained,
+                    "epochs": epochs,
+                    "batch_size": batch_size,
+                    "learning_rate": learning_rate,
+                    "warmup_steps": warmup_steps
+                }
+            )
+        else:
+            # Show validation errors
+            missing_files = data.get("missing_files", [])
+            message = data.get("message", "Validation failed")
+            
+            error_msg = f"Training not ready: {message}"
+            if missing_files:
+                error_msg += "\nMissing files:\n" + "\n".join(f"• {f}" for f in missing_files)
+            
+            dpg.set_value("training_status", "Status: Not ready")
+            update_status(error_msg)
+    
+    def on_validation_error(error_message):
+        dpg.set_value("training_status", "Status: Validation failed")
+        update_status(f"Validation error: {error_message}")
+    
+    # Validate first
+    threaded_api_call(
+        target=requests.get,
+        on_success=on_validation_success,
+        on_error=on_validation_error,
+        url=f"{API_URL}/validate-training-ready",
+        params={"dataset_root": g["dataset_root"]}
+    )
+
+def callback_stop_training(sender, app_data):
+    def on_success(data):
+        dpg.set_value("training_status", "Status: Stopped")
+        update_status("Training stop requested.")
+    
+    def on_error(error_message):
+        update_status(f"Failed to stop training: {error_message}")
+    
+    threaded_api_call(
+        target=requests.post,
+        on_success=on_success,
+        on_error=on_error,
+        url=f"{API_URL}/stop-training"
+    )
+
+def update_training_progress(progress):
+    """Update training progress bar and overlay."""
+    if dpg.does_item_exist("training_progress_bar"):
+        dpg.set_value("training_progress_bar", progress)
+        dpg.configure_item("training_progress_bar", overlay=f"{progress*100:.1f}%")
+
+def update_training_status(status):
+    """Update training status text."""
+    if dpg.does_item_exist("training_status"):
+        dpg.set_value("training_status", f"Status: {status}")
+
+def update_training_log(message):
+    """Add a message to the training log."""
+    if dpg.does_item_exist("training_log_text"):
+        current_text = dpg.get_value("training_log_text")
+        new_text = current_text + "\n" + message if current_text else message
+        # Keep only last 20 lines
+        lines = new_text.split('\n')
+        if len(lines) > 20:
+            lines = lines[-20:]
+        dpg.set_value("training_log_text", '\n'.join(lines))
+
+def training_status_poller():
+    """Background thread to poll training status."""
+    while dpg.is_dearpygui_running():
+        try:
+            response = requests.get(f"{API_URL}/training-status", timeout=5)
+            response.raise_for_status()
+            status_data = response.json()
+            
+            # Update UI with training status
+            g["ui_update_queue"].put((lambda s, a, u: update_training_progress(u), status_data.get("progress", 0)))
+            g["ui_update_queue"].put((lambda s, a, u: update_training_status(u), status_data.get("status", "idle")))
+            
+            # Update epoch, loss, and LR
+            if dpg.does_item_exist("training_epoch_text"):
+                epoch_text = f"Epoch: {status_data.get('current_epoch', 0)}/{status_data.get('total_epochs', 0)}"
+                g["ui_update_queue"].put((lambda s, a, u: dpg.set_value("training_epoch_text", u), epoch_text))
+            
+            if dpg.does_item_exist("training_loss_text"):
+                loss_text = f"Loss: {status_data.get('loss', 0):.4f}"
+                g["ui_update_queue"].put((lambda s, a, u: dpg.set_value("training_loss_text", u), loss_text))
+            
+            if dpg.does_item_exist("training_lr_text"):
+                lr_text = f"LR: {status_data.get('learning_rate', 0):.2e}"
+                g["ui_update_queue"].put((lambda s, a, u: dpg.set_value("training_lr_text", u), lr_text))
+            
+            # Update log
+            recent_logs = status_data.get("recent_logs", [])
+            if recent_logs and len(recent_logs) > len(g.get("last_training_logs", [])):
+                new_logs = recent_logs[len(g.get("last_training_logs", [])):]
+                g["last_training_logs"] = recent_logs
+                for log in new_logs:
+                    g["ui_update_queue"].put((lambda s, a, u: update_training_log(u), log))
+            
+        except requests.RequestException:
+            pass
+        
+        time.sleep(2)  # Poll every 2 seconds
 
 # --- UI Setup ---
 
@@ -740,7 +959,110 @@ def setup_ui():
                 dpg.add_text("Status", tag="umap_status_text")
 
             with dpg.tab(label="Training"):
-                dpg.add_text("Training and data augmentation UI will be implemented here.")
+                with dpg.group():
+                    # Header
+                    dpg.add_text("CLIP Model Fine-tuning", color=(255, 255, 0))
+                    dpg.add_separator()
+                    dpg.add_text("")  # Spacing
+                    
+                    # Create a grid layout with two columns
+                    with dpg.group(horizontal=True):
+                        # Left column - Training Steps
+                        with dpg.child_window(width=400, height=600):
+                            dpg.add_text("Training Pipeline", color=(200, 200, 255))
+                            dpg.add_separator()
+                            dpg.add_text("")  # Spacing
+                            
+                            # Step 1: Manual Captioning
+                            with dpg.group():
+                                dpg.add_text("Step 1: Manual Captioning", color=(255, 200, 200))
+                                dpg.add_text("Create captions for your images using the GUI tool.")
+                                dpg.add_text("Creates index.csv in your dataset directory.", color=(150, 150, 150))
+                                dpg.add_button(label="Start Manual Captioning", callback=callback_start_manual_captioning, width=-1)
+                                dpg.add_text("Status: Not started", tag="manual_captioning_status", color=(200, 200, 200))
+                                dpg.add_separator()
+                            
+                            # Step 2: Data Preparation
+                            with dpg.group():
+                                dpg.add_text("Step 2: Data Preparation", color=(200, 255, 200))
+                                dpg.add_text("Split captioned data into training (80%) and validation (20%) sets.")
+                                dpg.add_button(label="Prepare Training Data", callback=callback_prepare_training_data, width=-1)
+                                dpg.add_text("Status: Not started", tag="data_prep_status", color=(200, 200, 200))
+                                dpg.add_separator()
+                            
+                            # Step 3: Text Augmentation
+                            with dpg.group():
+                                dpg.add_text("Step 3: Text Augmentation", color=(200, 200, 255))
+                                dpg.add_text("Generate additional training samples through text variations.")
+                                
+                                with dpg.group(horizontal=True):
+                                    dpg.add_text("Method:")
+                                    dpg.add_combo(items=["llm", "manual"], tag="augmentation_method", default_value="llm", width=120)
+                                
+                                with dpg.group(horizontal=True):
+                                    dpg.add_text("Augmentations per sample:")
+                                    dpg.add_input_int(tag="num_augmentations", default_value=3, width=80, min_value=1, max_value=10)
+                                
+                                dpg.add_button(label="Run Text Augmentation", callback=callback_run_text_augmentation, width=-1)
+                                dpg.add_text("Status: Not started", tag="augmentation_status", color=(200, 200, 200))
+                                dpg.add_separator()
+                            
+                            # Step 4: Model Training
+                            with dpg.group():
+                                dpg.add_text("Step 4: Model Training", color=(255, 255, 200))
+                                dpg.add_text("Fine-tune your CLIP model on your custom dataset.")
+                                
+                                # Training parameters in a compact grid
+                                with dpg.group():
+                                    with dpg.group(horizontal=True):
+                                        dpg.add_text("Model:")
+                                        dpg.add_combo(items=["ViT-B-32", "ViT-L-14", "ViT-H-14"], tag="training_model", default_value="ViT-B-32", width=120)
+                                    
+                                    with dpg.group(horizontal=True):
+                                        dpg.add_text("Pretrained:")
+                                        dpg.add_combo(items=["openai"], tag="training_pretrained", default_value="openai", width=120)
+                                    
+                                    with dpg.group(horizontal=True):
+                                        dpg.add_text("Epochs:")
+                                        dpg.add_input_int(tag="training_epochs", default_value=10, width=80, min_value=1, max_value=100)
+                                        dpg.add_text("Batch Size:")
+                                        dpg.add_input_int(tag="training_batch_size", default_value=32, width=80, min_value=1, max_value=128)
+                                    
+                                    with dpg.group(horizontal=True):
+                                        dpg.add_text("Learning Rate:")
+                                        dpg.add_input_float(tag="training_lr", default_value=1e-4, width=100, format="%.0e")
+                                        dpg.add_text("Warmup:")
+                                        dpg.add_input_int(tag="training_warmup", default_value=10000, width=100, min_value=0)
+                                
+                                with dpg.group(horizontal=True):
+                                    dpg.add_button(label="Start Training", callback=callback_start_training, width=-1)
+                                    dpg.add_button(label="Stop Training", callback=callback_stop_training, width=-1)
+                                
+                                dpg.add_text("Status: Not started", tag="training_status", color=(200, 200, 200))
+                        
+                        # Right column - Progress and Logs
+                        with dpg.child_window(width=-1, height=600):
+                            dpg.add_text("Training Monitor", color=(200, 200, 255))
+                            dpg.add_separator()
+                            dpg.add_text("")  # Spacing
+                            
+                            # Progress Section
+                            with dpg.group():
+                                dpg.add_text("Progress", color=(255, 200, 200))
+                                dpg.add_progress_bar(tag="training_progress_bar", width=-1, overlay="0%")
+                                
+                                with dpg.group(horizontal=True):
+                                    dpg.add_text("Epoch:", tag="training_epoch_text")
+                                    dpg.add_text("Loss:", tag="training_loss_text")
+                                    dpg.add_text("LR:", tag="training_lr_text")
+                                
+                                dpg.add_separator()
+                            
+                            # Training Log
+                            with dpg.group():
+                                dpg.add_text("Training Log", color=(200, 255, 200))
+                                with dpg.child_window(tag="training_log_window", width=-1, height=400):
+                                    dpg.add_text("Training log will appear here...", tag="training_log_text", color=(180, 180, 180))
 
 def launch_gui(api_url: str):
     global API_URL
