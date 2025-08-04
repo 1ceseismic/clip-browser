@@ -3,7 +3,7 @@ import os
 import pandas as pd
 import numpy as np
 
-IMAGE_FOLDER = "dataset/"
+IMAGE_FOLDER = "."  # Current directory
 OUTPUT_CSV = "index.csv"
 DISPLAY_SIZE = (800, 600)
 
@@ -21,7 +21,7 @@ else:
     df = pd.DataFrame(columns=['filepath', 'caption'])
     done_files = set()
 
-images = sorted([f for f in os.listdir(IMAGE_FOLDER) if f.lower().endswith(('.jpg', '.png', '.jpeg'))])
+images = sorted([f for f in os.listdir(IMAGE_FOLDER) if f.lower().endswith(('.jpg', '.png', '.jpeg')) and os.path.isfile(os.path.join(IMAGE_FOLDER, f))])
 
 cv2.namedWindow("Image Tagger")
 

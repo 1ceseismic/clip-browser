@@ -30,6 +30,9 @@ def start_server():
     server_thread = threading.Thread(target=run_server, daemon=True)
     server_thread.start()
     print("Server thread started.")
+    
+    # Wait a moment for the server to start
+    time.sleep(2)
 
 def stop_server():
     if server_instance:
@@ -44,9 +47,23 @@ if __name__ == "__main__":
     start_server()
 
     print("Launching GUI...")
+    
+    # Check if server is running
+    try:
+        response = requests.get(f"{API_URL}/health", timeout=5)
+        if response.status_code == 200:
+            print("Server is running and responding.")
+        else:
+            print(f"Server responded with status code: {response.status_code}")
+    except requests.RequestException as e:
+        print(f"Warning: Could not connect to server: {e}")
+        print("The GUI may not work properly if the server is not running.")
+    
     try:
         from gui import launch_gui
         launch_gui(api_url=API_URL)
     except Exception as e:
         print(f"An error occurred while running the GUI: {e}")
+        import traceback
+        traceback.print_exc()
     sys.exit(0)
