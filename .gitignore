@@ -12,3 +12,5 @@ config.json
 metadata.json
 app_metadata.json
 /.indexes
+__pycache__\
+.cursor\
